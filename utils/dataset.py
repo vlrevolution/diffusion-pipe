@@ -6,6 +6,7 @@ import math
 import os
 import hashlib
 import json
+import tarfile
 
 import numpy as np
 import torch
@@ -84,24 +85,24 @@ def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerp
 class TextEmbeddingDataset:
     def __init__(self, te_dataset):
         self.te_dataset = te_dataset
-        self.image_file_to_te_idx = defaultdict(list)
-        for i, image_file in enumerate(te_dataset['image_file']):
-            self.image_file_to_te_idx[image_file].append(i)
+        self.image_spec_to_te_idx = defaultdict(list)
+        for i, image_spec in enumerate(te_dataset['image_spec']):
+            self.image_spec_to_te_idx[tuple(image_spec)].append(i)
 
-    def get_text_embeddings(self, image_file, caption_number):
-        return self.te_dataset[self.image_file_to_te_idx[image_file][caption_number]]
+    def get_text_embeddings(self, image_spec, caption_number):
+        return self.te_dataset[self.image_spec_to_te_idx[image_spec][caption_number]]
 
 
 def _cache_text_embeddings(metadata_dataset, map_fn, i, cache_dir, regenerate_cache, caching_batch_size):
 
     def flatten_captions(example):
-        image_file_out, caption_out, is_video_out = [], [], []
-        for image_file, captions, is_video in zip(example['image_file'], example['caption'], example['is_video']):
+        image_spec_out, caption_out, is_video_out = [], [], []
+        for image_spec, captions, is_video in zip(example['image_spec'], example['caption'], example['is_video']):
             for caption in captions:
-                image_file_out.append(image_file)
+                image_spec_out.append(image_spec)
                 caption_out.append(caption)
                 is_video_out.append(is_video)
-        return {'image_file': image_file_out, 'caption': caption_out, 'is_video': is_video_out}
+        return {'image_spec': image_spec_out, 'caption': caption_out, 'is_video': is_video_out}
 
     flattened_captions = metadata_dataset.map(flatten_captions, batched=True, keep_in_memory=True, remove_columns=metadata_dataset.column_names)
     te_dataset = _map_and_cache(
@@ -144,19 +145,19 @@ class SizeBucketDataset:
             caching_batch_size=caching_batch_size,
         )
         iteration_order = []
-        for example in self.latent_dataset.select_columns(['image_file', 'caption']):
-            image_file = example['image_file']
+        for example in self.latent_dataset.select_columns(['image_spec', 'caption']):
+            image_spec = example['image_spec']
             captions = example['caption']
             for i, caption in enumerate([captions[i:i + self.shuffle_skip] for i in range(0, len(captions), self.shuffle_skip)]):
-                iteration_order.append((image_file, caption, i))
+                iteration_order.append((image_spec, caption, i))
         # Shuffle again, since one media file can produce multiple training examples. E.g. video, or maybe
         # in the future data augmentation. Don't need to shuffle text embeddings since those are looked
         # up by image file name.
         shuffle_with_seed(iteration_order, 42)
         self.iteration_order = iteration_order
-        self.image_file_to_latents_idx = {
-            image_file: i
-            for i, image_file in enumerate(self.latent_dataset['image_file'])
+        self.image_spec_to_latents_idx = {
+            tuple(image_spec): i
+            for i, image_spec in enumerate(self.latent_dataset['image_spec'])
         }
 
 
@@ -170,15 +171,16 @@ class SizeBucketDataset:
 
     def __getitem__(self, idx):
         idx = idx % len(self.iteration_order)
-        image_file, caption, caption_number = self.iteration_order[idx]
-        ret = self.latent_dataset[self.image_file_to_latents_idx[image_file]]
+        image_spec, caption, caption_number = self.iteration_order[idx]
+        image_spec = tuple(image_spec)
+        ret = self.latent_dataset[self.image_spec_to_latents_idx[image_spec]]
         if DEBUG:
-            print(Path(image_file).stem)
+            print(Path(image_spec[1]).stem)
         offset = random.randrange(self.shuffle_skip)
         caption_idx = (caption_number*self.shuffle_skip) + offset
         for ds in self.text_embedding_datasets:
-            ret.update(ds.get_text_embeddings(image_file, caption_idx))
-        ret['caption'] = caption[caption_idx]
+            ret.update(ds.get_text_embeddings(image_spec, caption_idx))
+        ret['caption'] = caption[offset]
         return ret
 
     def __len__(self):
@@ -337,29 +339,36 @@ class DirectoryDataset:
         # Mask can have any extension, it just needs to have the same stem as the image.
         mask_file_stems = {path.stem: path for path in self.mask_path.glob('*') if path.is_file()} if self.mask_path is not None else {}
 
-        image_files = []
+        def process_file(file):
+            if file.suffix != '.tar':
+                return [(None, str(file))]
+            with tarfile.TarFile(file) as tar_f:
+                return [(str(file), name) for name in tar_f.getnames()]
+
+        image_specs = []
         caption_files = []
         mask_files = []
         for file in files:
             if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json':
                 continue
-            image_file = file
-            caption_file = image_file.with_suffix('.txt')
-            if not os.path.exists(caption_file):
-                caption_file = ''
-            image_files.append(str(image_file))
-            caption_files.append(str(caption_file))
-            if image_file.stem in mask_file_stems:
-                mask_files.append(str(mask_file_stems[image_file.stem]))
-            elif self.default_mask_file is not None:
-                mask_files.append(str(self.default_mask_file))
-            else:
-                if self.mask_path is not None:
-                    logger.warning(f'No mask file was found for image {image_file}, not using mask.')
-                mask_files.append(None)
-        assert len(image_files) > 0, f'Directory {self.path} had no images/videos!'
+            for image_spec in process_file(file):
+                image_file = Path(image_spec[1])
+                caption_file = image_file.with_suffix('.txt')
+                if not os.path.exists(caption_file):
+                    caption_file = ''
+                image_specs.append(image_spec)
+                caption_files.append(str(caption_file))
+                if image_file.stem in mask_file_stems:
+                    mask_files.append(str(mask_file_stems[image_file.stem]))
+                elif self.default_mask_file is not None:
+                    mask_files.append(str(self.default_mask_file))
+                else:
+                    if self.mask_path is not None:
+                        logger.warning(f'No mask file was found for image {image_file}, not using mask.')
+                    mask_files.append(None)
+        assert len(image_specs) > 0, f'Directory {self.path} had no images/videos!'
 
-        metadata_dataset = datasets.Dataset.from_dict({'image_file': image_files, 'caption_file': caption_files, 'mask_file': mask_files})
+        metadata_dataset = datasets.Dataset.from_dict({'image_spec': image_specs, 'caption_file': caption_files, 'mask_file': mask_files})
         # Shuffle the data. Use a deterministic seed, so the dataset is identical on all processes.
         # Seed is based on the hash of the directory path, so that if directories have the same set of images, they are shuffled differently.
         seed = int(hashlib.md5(str.encode(str(self.path))).hexdigest(), 16) % int(1e9)
@@ -431,10 +440,11 @@ class DirectoryDataset:
         def fn(example):
             # batch size always 1
             caption_file = example['caption_file'][0]
-            image_file = example['image_file'][0]
+            image_spec = example['image_spec'][0]
+            image_file = Path(image_spec[1])
             captions = None
             if caption_data is not None:
-                captions = caption_data.get(Path(image_file).name, None)
+                captions = caption_data.get(image_file.name, None)
                 if captions is None:
                     logger.warning(f'Image file {image_file} does not have an entry in captions.json')
                 else:
@@ -448,11 +458,19 @@ class DirectoryDataset:
             if self.directory_config['shuffle_tags'] and self.shuffle == 0: # backwards compatibility
                 self.shuffle = 1
             captions = shuffle_captions(captions, self.shuffle, self.shuffle_delimiter, self.directory_config['caption_prefix'])
-            empty_return = {'image_file': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
+            empty_return = {'image_spec': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
 
-            image_file = Path(image_file)
+            if image_spec[0] is None:
+                tar_f = None
+                file_obj = open(image_file)
+            else:
+                tar_f = tarfile.TarFile(image_spec[0])
+                file_obj = tar_f.extractfile(str(image_file))
+
             if image_file.suffix == '.webp':
-                frames = imageio.get_reader(image_file).get_length()
+                # Make sure this this object stays alive so it doesn't close file_obj on us.
+                reader = imageio.get_reader(file_obj)
+                frames = reader.get_length()
                 if frames > 1:
                     raise NotImplementedError('WebP videos are not supported.')
             try:
@@ -464,18 +482,23 @@ class DirectoryDataset:
                     #     height, width = frame.shape[:2]
                     # TODO: this is an estimate of frame count. What happens if variable frame rate? Is
                     # it still close enough?
-                    meta = imageio.v3.immeta(image_file)
-                    first_frame = next(imageio.v3.imiter(image_file))
+                    meta = imageio.v3.immeta(file_obj)
+                    first_frame = next(imageio.v3.imiter(file_obj))
                     height, width = first_frame.shape[:2]
                     assert self.framerate is not None, "Need model framerate but don't have it. This shouldn't happen. Is the framerate attribute on the model set?"
                     frames = int(self.framerate * meta['duration'])
                 else:
-                    pil_img = Image.open(image_file)
+                    pil_img = Image.open(file_obj)
                     width, height = pil_img.size
                     frames = 1
-            except Exception:
+            except Exception as e:
                 logger.warning(f'Media file {image_file} could not be opened. Skipping.')
                 return empty_return
+            finally:
+                file_obj.close()
+                if tar_f:
+                    tar_f.close()
+
             is_video = (frames > 1)
             log_ar = np.log(width / height)
 
@@ -493,7 +516,7 @@ class DirectoryDataset:
                 size_bucket = None
 
             return {
-                'image_file': [str(image_file)],
+                'image_spec': [image_spec],
                 'mask_file': [example['mask_file'][0]],
                 'caption': [captions],
                 'ar_bucket': [ar_bucket],
@@ -721,19 +744,19 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
     def latents_map_fn(example):
         first_size_bucket = example['size_bucket'][0]
         tensors_and_masks = []
-        image_files = []
+        image_specs = []
         captions = []
-        for path, mask_path, size_bucket, caption in zip(example['image_file'], example['mask_file'], example['size_bucket'], example['caption']):
+        for image_spec, mask_path, size_bucket, caption in zip(example['image_spec'], example['mask_file'], example['size_bucket'], example['caption']):
             assert size_bucket == first_size_bucket
-            items = preprocess_media_file_fn(path, mask_path, size_bucket)
+            items = preprocess_media_file_fn(image_spec, mask_path, size_bucket)
             tensors_and_masks.extend(items)
-            image_files.extend([path] * len(items))
+            image_specs.extend([image_spec] * len(items))
             captions.extend([caption] * len(items))
 
         if len(tensors_and_masks) == 0:
-            return {'latents': [], 'mask': [], 'image_file': [], 'caption': []}
+            return {'latents': [], 'mask': [], 'image_spec': [], 'caption': []}
 
-        caching_batch_size = len(example['image_file'])
+        caching_batch_size = len(example['image_spec'])
         results = defaultdict(list)
         for i in range(0, len(tensors_and_masks), caching_batch_size):
             tensors = [t[0] for t in tensors_and_masks[i:i+caching_batch_size]]
@@ -746,7 +769,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         # concatenate the list of tensors at each key into one batched tensor
         for k, v in results.items():
             results[k] = torch.cat(v)
-        results['image_file'] = image_files
+        results['image_spec'] = image_specs
         results['mask'] = [t[1] for t in tensors_and_masks]
         results['caption'] = captions
         return results
@@ -759,7 +782,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
             parent_conn, child_conn = mp.Pipe(duplex=False)
             queue.put((text_encoder_idx+1, example['caption'], example['is_video'], child_conn))
             result = parent_conn.recv()  # dict
-            result['image_file'] = example['image_file']
+            result['image_spec'] = example['image_spec']
             return result
         for ds in datasets:
             ds.cache_text_embeddings(text_embedding_map_fn, text_encoder_idx+1, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
