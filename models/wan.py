@@ -432,11 +432,12 @@ class WanPipeline(BasePipeline):
         )
 
         # Same here, this isn't a nn.Module.
-        # TODO: by default the VAE is float32, and therefore so are the latents. Do we want to change that?
         self.vae = WanVAE(
             vae_pth=os.path.join(ckpt_dir, wan_config.vae_checkpoint),
             device='cpu',
+            dtype=dtype,
         )
+        self.vae.model.to(dtype)
         # These need to be on the device the VAE will be moved to during caching.
         self.vae.mean = self.vae.mean.to('cuda')
         self.vae.std = self.vae.std.to('cuda')
