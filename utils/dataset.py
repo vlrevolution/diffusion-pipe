@@ -25,6 +25,8 @@ DEBUG = False
 IMAGE_SIZE_ROUND_TO_MULTIPLE = 32
 NUM_PROC = min(8, os.cpu_count())
 
+UNCOND_FRACTION = 0.0
+
 
 def shuffle_with_seed(l, seed=None):
     rng_state = random.getstate()
@@ -129,6 +131,7 @@ class SizeBucketDataset:
         self.cache_dir = self.path / 'cache' / self.model_name / f'cache_{size_bucket[0]}x{size_bucket[1]}x{size_bucket[2]}'
         os.makedirs(self.cache_dir, exist_ok=True)
         self.text_embedding_datasets = []
+        self.uncond_text_embeddings = []
         self.num_repeats = self.directory_config['num_repeats']
         self.shuffle_skip = max(directory_config.get('cache_shuffle_num', 0), 1) # Should be provided in DirectoryDataset
         if self.num_repeats <= 0:
@@ -171,16 +174,21 @@ class SizeBucketDataset:
 
     def __getitem__(self, idx):
         idx = idx % len(self.iteration_order)
-        image_spec, caption, caption_number = self.iteration_order[idx]
+        image_spec, captions, caption_number = self.iteration_order[idx]
         image_spec = tuple(image_spec)
         ret = self.latent_dataset[self.image_spec_to_latents_idx[image_spec]]
         if DEBUG:
             print(Path(image_spec[1]).stem)
         offset = random.randrange(self.shuffle_skip)
         caption_idx = (caption_number*self.shuffle_skip) + offset
-        for ds in self.text_embedding_datasets:
-            ret.update(ds.get_text_embeddings(image_spec, caption_idx))
-        ret['caption'] = caption[offset]
+
+        use_uncond = UNCOND_FRACTION > 0 and random.random() < UNCOND_FRACTION
+        caption = '' if use_uncond else captions[offset]
+
+        for ds, uncond_ds in zip(self.text_embedding_datasets, self.uncond_text_embeddings):
+            emb_dict = uncond_ds[0] if use_uncond else ds.get_text_embeddings(image_spec, caption_idx)
+            ret.update(emb_dict)
+        ret['caption'] = caption
         return ret
 
     def __len__(self):
@@ -599,9 +607,20 @@ class DirectoryDataset:
 
     def cache_text_embeddings(self, map_fn, i, regenerate_cache=False, caching_batch_size=1):
         print(f'caching text embeddings: {self.path}')
-        datasets = self.size_bucket_datasets if self.use_size_buckets else self.ar_bucket_datasets
-        for ds in datasets:
+        datasets_list = self.size_bucket_datasets if self.use_size_buckets else self.ar_bucket_datasets
+        for ds in datasets_list:
             ds.cache_text_embeddings(map_fn, i, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
+        # TODO: do this separately for is_video True and False for models that support it?
+        empty_caption_ds = datasets.Dataset.from_dict({'caption': [''], 'is_video': [False], 'image_spec': [(None, None)]})
+        uncond_text_embeddings_ds = _map_and_cache(
+            empty_caption_ds,
+            map_fn,
+            cache_dir=self.cache_dir,
+            cache_file_prefix='uncond_text_embeddings_',
+            regenerate_cache=regenerate_cache,
+        )
+        for size_bucket_ds in self.get_size_bucket_datasets():
+            size_bucket_ds.uncond_text_embeddings.append(uncond_text_embeddings_ds)
 
 
 # Outermost dataset object that the caller uses. Contains multiple ConcatenatedBatchedDataset. Responsible

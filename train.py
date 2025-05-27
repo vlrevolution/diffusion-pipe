@@ -265,6 +265,7 @@ if __name__ == '__main__':
 
     set_config_defaults(config)
     common.AUTOCAST_DTYPE = config['model']['dtype']
+    dataset_util.UNCOND_FRACTION = config.get('uncond_fraction', 0.0)
 
     # Initialize distributed environment before deepspeed
     world_size, rank, local_rank = distributed_init(args)
