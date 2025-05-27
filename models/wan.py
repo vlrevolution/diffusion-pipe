@@ -558,7 +558,6 @@ class WanPipeline(BasePipeline):
 
     def prepare_inputs(self, inputs, timestep_quantile=None):
         latents = inputs['latents'].float()
-        # TODO: why does text_embeddings become float32 here? It's bfloat16 coming out of the text encoder.
         text_embeddings = inputs['text_embeddings']
         seq_lens = inputs['seq_lens']
         mask = inputs['mask']
