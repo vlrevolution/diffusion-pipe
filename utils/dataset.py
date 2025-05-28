@@ -357,7 +357,7 @@ class DirectoryDataset:
         caption_files = []
         mask_files = []
         for file in files:
-            if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json':
+            if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet':
                 continue
             for image_spec in process_file(file):
                 image_file = Path(image_spec[1])
