@@ -1005,7 +1005,7 @@ class PipelineDataLoader:
             sampler = None
         self.dataloader = torch.utils.data.DataLoader(
             self.dataset,
-            pin_memory=True,
+            pin_memory=False,
             batch_size=None,
             sampler=sampler,
             num_workers=self.num_dataloader_workers,
