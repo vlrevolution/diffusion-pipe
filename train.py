@@ -551,6 +551,9 @@ if __name__ == '__main__':
         elif optim_type_lower == 'automagic':
             from optimizers import automagic
             klass = automagic.Automagic
+        elif optim_type_lower == 'genericoptim':
+            from optimizers import generic_optim
+            klass = generic_optim.GenericOptim
         else:
             import pytorch_optimizer
             klass = getattr(pytorch_optimizer, optim_type)
@@ -613,9 +616,32 @@ if __name__ == '__main__':
 
             from optimizers import gradient_release
             return gradient_release.GradientReleaseOptimizerWrapper(list(optimizer_dict.values()))
+        elif optim_type_lower == 'genericoptim':
+            new_param_groups = []
+            param_groups = model.get_param_groups(model_parameters)
+            for pg in param_groups:
+                params = pg.pop('params')
+                params_2d = []
+                params_other = []
+                for p in params:
+                    if p.ndim == 2:
+                        params_2d.append(p)
+                    else:
+                        params_other.append(p)
+                pg_2d = pg.copy()
+                pg_2d['params'] = params_2d
+                pg_2d['subset_size'] = 'heuristics'
+                for key in ('rank', 'proj_type', 'update_proj_gap'):
+                    if key in kwargs:
+                        pg_2d[key] = kwargs.pop(key)
+                new_param_groups.append(pg_2d)
+                pg_other = pg
+                pg_other['params'] = params_other
+                new_param_groups.append(pg_other)
+            return klass(new_param_groups, *args, **kwargs)
         else:
-            model_parameters = model.get_param_groups(model_parameters)
-            return klass(model_parameters, *args, **kwargs)
+            param_groups = model.get_param_groups(model_parameters)
+            return klass(param_groups, *args, **kwargs)
 
     model_engine, optimizer, _, _ = deepspeed.initialize(
         args=args,

@@ -240,7 +240,7 @@ class BasePipeline:
     # Get param groups that will be passed into the optimizer. Models can override this, e.g. SDXL
     # supports separate learning rates for unet and text encoders.
     def get_param_groups(self, parameters):
-        return parameters
+        return [{'params': parameters}]
 
     # Default loss_fn. MSE between output and target, with mask support.
     def get_loss_fn(self):
