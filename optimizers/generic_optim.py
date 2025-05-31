@@ -17,10 +17,14 @@ from transformers.utils.versions import require_version
 def get_and_update_subset_norm_denom(group, state, grad, beta2):
     # First, compute subset norm if applicable
     if "subset_size" in group:
+        if group.get('correct_dim', False):
+            reduce_fn = torch.mean
+        else:
+            reduce_fn = torch.sum
         if group["subset_size"] == "heuristics":  # heuristics
             if "reduce_dim" not in state:
                 state["reduce_dim"] = 0 if grad.shape[0] >= grad.shape[1] else 1
-            second_moment_update = torch.sum(grad ** 2, dim=(1 - state["reduce_dim"]), keepdim=True)
+            second_moment_update = reduce_fn(grad ** 2, dim=(1 - state["reduce_dim"]), keepdim=True)
         else:  # it is an int
             assert group["subset_size"] != 0, f"Subset size should not be 0."
             if "subset_shape" not in state:
@@ -32,7 +36,7 @@ def get_and_update_subset_norm_denom(group, state, grad, beta2):
                     reduce_size = closest_smaller_divisor_of_n_to_k(numel, int(math.sqrt(numel) / div))
                 state["subset_shape"] = (numel // reduce_size, reduce_size)
             reshaped_grad = grad.view(state["subset_shape"])
-            second_moment_update = torch.sum(reshaped_grad ** 2, dim=1, keepdim=True)
+            second_moment_update = reduce_fn(reshaped_grad ** 2, dim=1, keepdim=True)
     else:  # standard EMA
         second_moment_update = grad ** 2
 
@@ -192,7 +196,8 @@ class GenericOptim(Optimizer):
             weight_decay: float = 0.0,
             correct_bias: bool = True,
             momentum_type: str = "ema",
-            second_moment_type: str = "ema"
+            second_moment_type: str = "ema",
+            correct_dim=False,
     ):
         self.momentum_type = momentum_type
         assert self.momentum_type in ["ema", "sm", "none"]
@@ -208,12 +213,12 @@ class GenericOptim(Optimizer):
             raise ValueError(f"Invalid beta parameter: {betas[1]} - should be in [0.0, 1.0]")
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
-        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias}
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
-              f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}")
+              f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}")
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
