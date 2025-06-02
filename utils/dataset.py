@@ -470,7 +470,7 @@ class DirectoryDataset:
 
             if image_spec[0] is None:
                 tar_f = None
-                file_obj = open(image_file)
+                file_obj = open(image_file, 'rb')
             else:
                 tar_f = tarfile.TarFile(image_spec[0])
                 file_obj = tar_f.extractfile(str(image_file))

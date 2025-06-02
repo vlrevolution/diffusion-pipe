@@ -78,7 +78,7 @@ class PreprocessMediaFile:
 
         if spec[0] is None:
             tar_f = None
-            file_obj = open(spec[1])
+            file_obj = open(spec[1], 'rb')
         else:
             tar_f = tarfile.TarFile(spec[0])
             file_obj = tar_f.extractfile(str(spec[1]))
