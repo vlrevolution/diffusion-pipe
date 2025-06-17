@@ -208,8 +208,9 @@ class CosmosPredict2Pipeline(BasePipeline):
         peft_state_dict = {'diffusion_model.'+k: v for k, v in peft_state_dict.items()}
         safetensors.torch.save_file(peft_state_dict, save_dir / 'adapter_model.safetensors', metadata={'format': 'pt'})
 
-    def save_model(self, save_dir, diffusers_sd):
-        raise NotImplementedError()
+    def save_model(self, save_dir, state_dict):
+        state_dict = {'net.'+k: v for k, v in state_dict.items()}
+        safetensors.torch.save_file(state_dict, save_dir / 'model.safetensors', metadata={'format': 'pt'})
 
     def get_preprocess_media_file_fn(self):
         return PreprocessMediaFile(
