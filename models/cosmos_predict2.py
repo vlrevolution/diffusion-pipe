@@ -1,20 +1,15 @@
-from statistics import NormalDist
-from typing import Tuple
 import os.path
 import sys
+import math
 sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), '../submodules/Wan2_1'))
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-import numpy as np
 import safetensors
 from transformers import T5TokenizerFast, T5EncoderModel
 from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
-from diffusers.configuration_utils import register_to_config
-from diffusers.schedulers import KDPM2DiscreteScheduler
-from einops import rearrange
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
 from models.cosmos_predict2_modeling import MiniTrainDIT
@@ -23,19 +18,17 @@ from utils.offloading import ModelOffloader
 from wan.modules.vae import WanVAE_
 
 
-SIGMA_DATA = 1.0
 KEEP_IN_HIGH_PRECISION = ['x_embedder', 't_embedder', 't_embedding_norm', 'final_layer']
 
 
-def get_per_sigma_loss_weights(sigma: torch.Tensor):
-    """
-    Args:
-        sigma (tensor): noise level
+def time_shift(mu: float, sigma: float, t: torch.Tensor):
+    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
-    Returns:
-        loss weights per sigma noise level
-    """
-    return (sigma**2 + SIGMA_DATA**2) / (sigma * SIGMA_DATA) ** 2
+
+def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15):
+    m = (y2 - y1) / (x2 - x1)
+    b = y1 - m * x1
+    return lambda x: m * x + b
 
 
 def _video_vae(pretrained_path=None, z_dim=None, device='cpu', **kwargs):
@@ -94,76 +87,6 @@ class WanVAE:
 
 def vae_encode(tensor, vae):
     return vae.model.encode(tensor, vae.scale)
-
-
-class RectifiedFlowAB2Scheduler(KDPM2DiscreteScheduler):
-    @register_to_config
-    def __init__(
-        self,
-        sigma_min: float = 0.002,
-        sigma_max: float = 80.0,
-        order: float = 7.0,
-        t_scaling_factor: float = 1.0,
-        use_double_precision: bool = True,
-        **kpm2_kwargs,
-    ):
-        super().__init__(
-            prediction_type="epsilon",  # placeholder, not used
-            num_train_timesteps=1000,  # dummy, not used at inference
-            **kpm2_kwargs,
-        )
-        self.gaussian_dist = NormalDist(mu=0.0, sigma=1.0)
-
-    def sample_sigma(self, batch_size: int, timestep_quantile=None) -> torch.Tensor:
-        if timestep_quantile is not None:
-            cdf_vals = np.full((batch_size,), timestep_quantile)
-        else:
-            cdf_vals = np.random.uniform(size=(batch_size))
-        samples_interval_gaussian = [self.gaussian_dist.inv_cdf(cdf_val) for cdf_val in cdf_vals]
-        log_sigma = torch.tensor(samples_interval_gaussian, device="cuda")
-        return torch.exp(log_sigma)
-
-    def set_timesteps(self, num_inference_steps, device=None, num_train_timesteps: int | None = None):
-        """Create Karras-like sigma schedule matching Rectified-Flow's paper."""
-
-        device = device or torch.device("cpu")
-
-        # Create (L + 1) sigma values following Karras et al. (Eq. 5)
-        n_sigma = num_inference_steps + 1
-        i = torch.arange(
-            n_sigma, device=device, dtype=torch.float64 if self.config.use_double_precision else torch.float32
-        )
-
-        # Extract values from config to ensure consistency
-        sigma_min = self.config.sigma_min
-        sigma_max = self.config.sigma_max
-        order = self.config.order
-
-        ramp = (sigma_max ** (1 / order)) + i / (n_sigma - 1) * (sigma_min ** (1 / order) - sigma_max ** (1 / order))
-        sigmas = ramp**order  # shape (n_sigma,)
-
-        self.sigmas = sigmas.to(dtype=torch.float64 if self.config.use_double_precision else torch.float32)
-        self.timesteps = torch.arange(num_inference_steps, device=device, dtype=torch.long)
-        self.num_inference_steps = num_inference_steps
-
-        return self.timesteps
-
-
-class RectifiedFlowScaling:
-    def __init__(self, sigma_data: float = 1.0, t_scaling_factor: float = 1.0):
-        assert abs(sigma_data - 1.0) < 1e-6, "sigma_data must be 1.0 for RectifiedFlowScaling"
-        self.t_scaling_factor = t_scaling_factor
-
-    def __call__(self, sigma: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        t = sigma / (sigma + 1)
-        c_skip = 1.0 - t
-        c_out = -t
-        c_in = 1.0 - t
-        c_noise = t * self.t_scaling_factor
-        return c_skip, c_out, c_in, c_noise
-
-    def sigma_loss_weights(self, sigma: torch.Tensor) -> torch.Tensor:
-        return 1.0 / sigma**2
 
 
 def get_dit_config(state_dict, key_prefix=''):
@@ -253,15 +176,6 @@ class CosmosPredict2Pipeline(BasePipeline):
         dtype = self.model_config['dtype']
         transformer_dtype = self.model_config.get('transformer_dtype', dtype)
 
-        rectified_flow_t_scaling_factor = 1.0
-        self.scheduler = RectifiedFlowAB2Scheduler(
-            sigma_min=0.002,
-            sigma_max=80.0,
-            order=7.0,
-            t_scaling_factor=rectified_flow_t_scaling_factor,
-        )
-        self.scaling = RectifiedFlowScaling(SIGMA_DATA, rectified_flow_t_scaling_factor)
-
         state_dict = load_state_dict(self.model_config['transformer_path'])
         # Remove 'net.' prefix
         new_state_dict = {}
@@ -342,63 +256,64 @@ class CosmosPredict2Pipeline(BasePipeline):
             return {'prompt_embeds': encoded_text}
         return fn
 
+    # Note to myself / future readers:
+    # The timestep sampling, input construction, and loss function have a different formulation here than how Nvidia does it
+    # in the official code. It wasn't obvious at first, but if you work through the math you will see the this model is just
+    # a standard rectified flow model, the same as Flux, SD3, Lumina 2, etc. The ONLY difference is that in the way Nvidia
+    # formulated it, you end up with an effective loss weighting of t**2 + (1-t)**2. This is a quadratic that is 1 at the endpoints
+    # t=0 and t=1, and 0.5 at t=0.5. So, the middle timesteps are downweighted slightly. I left out this weighting because I don't
+    # see any justification or point to doing it. As such, everything here aligns with the other rectified flow models.
     def prepare_inputs(self, inputs, timestep_quantile=None):
-        x0_B_C_T_H_W = inputs['latents'].float()
+        latents = inputs['latents'].float()
         prompt_embeds = inputs['prompt_embeds']
         mask = inputs['mask']
 
-        bs, channels, num_frames, h, w = x0_B_C_T_H_W.shape
-        device = x0_B_C_T_H_W.device
+        bs, channels, num_frames, h, w = latents.shape
 
         if mask is not None:
             mask = mask.unsqueeze(1)  # make mask (bs, 1, img_h, img_w)
             mask = F.interpolate(mask, size=(h, w), mode='nearest-exact')  # resize to latent spatial dimension
             mask = mask.unsqueeze(2)  # make mask same number of dims as target
 
-        # draw_training_sigma_and_epsilon in original code
-        epsilon_B_C_T_H_W = torch.randn(x0_B_C_T_H_W.size(), device=device)
-        sigma_B = self.scheduler.sample_sigma(bs, timestep_quantile=timestep_quantile).to(device=device)
-        sigma_B_T = rearrange(sigma_B, "b -> b 1")  # add a dimension for T, all frames share the same sigma
+        timestep_sample_method = self.model_config.get('timestep_sample_method', 'logit_normal')
 
-        # Get the mean and stand deviation of the marginal probability distribution.
-        mean_B_C_T_H_W, std_B_T = x0_B_C_T_H_W, sigma_B_T
-        # Generate noisy observations
-        xt_B_C_T_H_W = mean_B_C_T_H_W + epsilon_B_C_T_H_W * rearrange(std_B_T, "b t -> b 1 t 1 1")
+        if timestep_sample_method == 'logit_normal':
+            dist = torch.distributions.normal.Normal(0, 1)
+        elif timestep_sample_method == 'uniform':
+            dist = torch.distributions.uniform.Uniform(0, 1)
+        else:
+            raise NotImplementedError()
 
-        sigma_B_1_T_1_1 = rearrange(sigma_B_T, "b t -> b 1 t 1 1")
-        # get precondition for the network
-        c_skip_B_1_T_1_1, c_out_B_1_T_1_1, c_in_B_1_T_1_1, c_noise_B_1_T_1_1 = self.scaling(sigma=sigma_B_1_T_1_1)
+        if timestep_quantile is not None:
+            t = dist.icdf(torch.full((bs,), timestep_quantile, device=latents.device))
+        else:
+            t = dist.sample((bs,)).to(latents.device)
 
-        x_B_C_T_H_W=(xt_B_C_T_H_W * c_in_B_1_T_1_1)
-        timesteps_B_T=c_noise_B_1_T_1_1.squeeze(dim=[1, 3, 4])
+        if timestep_sample_method == 'logit_normal':
+            sigmoid_scale = self.model_config.get('sigmoid_scale', 1.0)
+            t = t * sigmoid_scale
+            t = torch.sigmoid(t)
 
-        return (x_B_C_T_H_W, timesteps_B_T, prompt_embeds, xt_B_C_T_H_W, sigma_B_T), (x0_B_C_T_H_W, mask)
+        if shift := self.model_config.get('shift', None):
+            t = (t * shift) / (1 + (shift - 1) * t)
+        elif self.model_config.get('flux_shift', False):
+            mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+            t = time_shift(mu, 1.0, t)
+
+        noise = torch.randn_like(latents)
+        t_expanded = t.view(-1, 1, 1, 1, 1)
+        noisy_latents = (1 - t_expanded)*latents + t_expanded*noise
+        target = noise - latents
+
+        return (noisy_latents, t.view(-1, 1), prompt_embeds), (target, mask)
 
     def to_layers(self):
         transformer = self.transformer
         layers = [InitialLayer(transformer)]
         for i, block in enumerate(transformer.blocks):
             layers.append(TransformerLayer(block, i, self.offloader))
-        layers.append(FinalLayer(transformer, self.scaling))
+        layers.append(FinalLayer(transformer))
         return layers
-
-    # Default loss_fn. MSE between output and target, with mask support.
-    def get_loss_fn(self):
-        def loss_fn(output, label):
-            x0_pred_B_C_T_H_W, weights_per_sigma_B_T = output
-            x0_B_C_T_H_W, mask = label
-            with torch.autocast('cuda', enabled=False):
-                x0_pred_B_C_T_H_W = x0_pred_B_C_T_H_W.to(torch.float32)
-                x0_B_C_T_H_W = x0_B_C_T_H_W.to(x0_pred_B_C_T_H_W.device, torch.float32)
-                pred_mse_B_C_T_H_W = F.mse_loss(x0_pred_B_C_T_H_W, x0_B_C_T_H_W, reduction='none')
-                # empty tensor means no masking
-                if mask.numel() > 0:
-                    mask = mask.to(output.device, torch.float32)
-                    pred_mse_B_C_T_H_W *= mask
-                edm_loss_B_C_T_H_W = pred_mse_B_C_T_H_W * rearrange(weights_per_sigma_B_T, "b t -> b 1 t 1 1")
-                edm_loss_B_C_T_H_W = edm_loss_B_C_T_H_W.mean()
-            return edm_loss_B_C_T_H_W
-        return loss_fn
 
     def enable_block_swap(self, blocks_to_swap):
         transformer = self.transformer
@@ -448,7 +363,7 @@ class InitialLayer(nn.Module):
             if torch.is_floating_point(item):
                 item.requires_grad_(True)
 
-        x_B_C_T_H_W, timesteps_B_T, crossattn_emb, xt_B_C_T_H_W, sigma_B_T = inputs
+        x_B_C_T_H_W, timesteps_B_T, crossattn_emb = inputs
 
         padding_mask = torch.zeros(x_B_C_T_H_W.shape[0], 1, x_B_C_T_H_W.shape[3], x_B_C_T_H_W.shape[4], dtype=x_B_C_T_H_W.dtype, device=x_B_C_T_H_W.device)
         x_B_T_H_W_D, rope_emb_L_1_1_D, extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D = self.prepare_embedded_sequence(
@@ -464,7 +379,7 @@ class InitialLayer(nn.Module):
         t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder(timesteps_B_T)
         t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
 
-        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, xt_B_C_T_H_W, sigma_B_T)
+        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T)
 
 
 class TransformerLayer(nn.Module):
@@ -476,20 +391,19 @@ class TransformerLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, xt_B_C_T_H_W, sigma_B_T = inputs
+        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T = inputs
 
         self.offloader.wait_for_block(self.block_idx)
         x_B_T_H_W_D = self.block(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D=rope_emb_L_1_1_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
         self.offloader.submit_move_blocks_forward(self.block_idx)
 
-        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, xt_B_C_T_H_W, sigma_B_T)
+        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T)
 
 
 class FinalLayer(nn.Module):
-    def __init__(self, model, scaling):
+    def __init__(self, model):
         super().__init__()
         self.final_layer = model.final_layer
-        self.scaling = scaling
         self.model = [model]
 
     def __getattr__(self, name):
@@ -500,12 +414,7 @@ class FinalLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, xt_B_C_T_H_W, sigma_B_T = inputs
+        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T = inputs
         x_B_T_H_W_O = self.final_layer(x_B_T_H_W_D, t_embedding_B_T_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
         net_output_B_C_T_H_W = self.unpatchify(x_B_T_H_W_O)
-
-        sigma_B_1_T_1_1 = rearrange(sigma_B_T, "b t -> b 1 t 1 1")
-        c_skip_B_1_T_1_1, c_out_B_1_T_1_1, c_in_B_1_T_1_1, c_noise_B_1_T_1_1 = self.scaling(sigma=sigma_B_1_T_1_1)
-        x0_pred_B_C_T_H_W = c_skip_B_1_T_1_1 * xt_B_C_T_H_W + c_out_B_1_T_1_1 * net_output_B_C_T_H_W
-        weights_per_sigma_B_T = get_per_sigma_loss_weights(sigma=sigma_B_T)
-        return x0_pred_B_C_T_H_W, weights_per_sigma_B_T
+        return net_output_B_C_T_H_W
