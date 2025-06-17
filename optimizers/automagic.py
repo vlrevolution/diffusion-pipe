@@ -303,11 +303,14 @@ class Automagic(torch.optim.Optimizer):
                     # we'll use element-wise multiplication to apply the weight decay
                     weight_decay_update = p_data_fp32 * (-group["weight_decay"]) * new_lr
                     p_data_fp32.add_(weight_decay_update)
+                else:
+                    weight_decay_update = None
 
                 if p.dtype == torch.bfloat16:
                     # Kahan summation for bfloat16
                     update.mul_(-1)
-                    update.add_(weight_decay_update)
+                    if weight_decay_update is not None:
+                        update.add_(weight_decay_update)
                     shift = state['shift']
                     shift.add_(update)
                     # Use grad as temp buffer

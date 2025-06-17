@@ -1,7 +1,7 @@
 # diffusion-pipe
 A pipeline parallel training script for diffusion models.
 
-Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream.
+Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2.
 
 **Work in progress.** This is a side project for me and my time is limited. I will try to add new models and features when I can.
 
@@ -15,6 +15,12 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - Easily add new models by implementing a single subclass
 
 ## Recent changes
+- 2025-06-14
+  - Cosmos-Predict2 t2i LoRA training is supported. As usual, see the supported models doc for details.
+  - Added option for using float8_e5m2 as the transformer_dtype.
+- 2025-06-10
+  - Stable Diffusion 3 LoRA training is supported.
+  - Pinned Deepspeed version to fix error caused by Deepspeed 0.17.1.
 - 2025-05-22
   - Add Automagic optimizer
   - Support i2v training for LTX-Video. Thanks @GallenShao for the PR!
@@ -35,12 +41,6 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - 2025-03-16
   - Support loading any optimizer from the pytorch-optimizer library.
   - Wan transformer and UMT5 can now be loaded from ComfyUI files. Thanks to @qiwang1996 for the PR!
-- 2025-03-09
-  - Block swapping is supported for Wan, HunyuanVideo, Flux, and Chroma.
-    - Big thanks to @kohya-ss and [Musubi Tuner](https://github.com/kohya-ss/musubi-tuner) from which most of the implementation is taken.
-    - See the example hunyuan_video.toml file for how to configure.
-  - Reduced memory use of Wan by removing some forced casts to float32. I am able to measure a very small, but consistent increase in validation loss, so there is at least some decrease in quality. But the memory savings are large when training on videos, and it is likely worth it.
-    - On the 14B t2v model, by using fp8 transformer, AdamW8bitKahan optimizer, and offloading most of the blocks (e.g. blocks_to_swap=32), you can (just barely) train 512x512x81 sized videos on a single 4090.
 
 ## Windows support
 It will be difficult or impossible to make training work on native Windows. This is because Deepspeed only has [partial Windows support](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/README.md). Deepspeed is a hard requirement because the entire training script is built around Deepspeed pipeline parallelism. However, it will work on Windows Subsystem for Linux, specifically WSL 2. If you must use Windows I recommend trying WSL 2.

@@ -317,6 +317,9 @@ if __name__ == '__main__':
     elif model_type == 'sd3':
         from models import sd3
         model = sd3.SD3Pipeline(config)
+    elif model_type == 'cosmos_predict2':
+        from models import cosmos_predict2
+        model = cosmos_predict2.CosmosPredict2Pipeline(config)
     else:
         raise NotImplementedError(f'Model type {model_type} is not implemented')
 

@@ -11,6 +11,8 @@
 |Wan2.1          |✅    |❌              |✅                |
 |Chroma          |✅    |✅              |✅                |
 |HiDream         |✅    |❌              |✅                |
+|SD3             |✅    |❌              |✅                |
+|Cosmos-Predict2 |✅    |❌              |✅                |
 
 
 ## SDXL
@@ -222,3 +224,38 @@ Due to how the Llama3 text embeddings are computed, the Llama3 text encoder must
 Without block swapping, you will need 48GB VRAM, or 2x24GB with pipeline parallelism. With enough block swapping you can train on a single 24GB GPU. Using nf4 quantization also allows training with 24GB, but there may be some quality decrease.
 
 HiDream LoRAs are saved in ComfyUI format.
+
+## Stable Diffusion 3
+```
+[model]
+type = 'sd3'
+diffusers_path = '/data2/imagegen_models/stable-diffusion-3.5-medium'
+dtype = 'bfloat16'
+#transformer_dtype = 'float8'
+#flux_shift = true
+```
+
+Stable Diffusion 3 LoRA training is supported. You need the full Diffusers folder for the model. Tested on SD3.5 Medium and Large.
+
+SD3 LoRAs are saved in Diffusers format. This format works in ComfyUI.
+
+## Cosmos-Predict2
+```
+[model]
+type = 'cosmos_predict2'
+transformer_path = '/data2/imagegen_models/Cosmos-Predict2-2B-Text2Image/model.pt'
+vae_path = '/data2/imagegen_models/comfyui-models/wan_2.1_vae.safetensors'
+t5_path = '/data2/imagegen_models/comfyui-models/oldt5_xxl_fp16.safetensors'
+dtype = 'bfloat16'
+#transformer_dtype = 'float8_e5m2'
+```
+
+Cosmos-Predict2 LoRA training is supported. Currently only for the t2i model variants.
+
+Set transformer_path to the original model checkpoint, vae_path to the ComfyUI Wan VAE, and t5_path to the ComfyUI [old T5 model file](https://huggingface.co/comfyanonymous/cosmos_1.0_text_encoder_and_VAE_ComfyUI/blob/main/text_encoders/oldt5_xxl_fp16.safetensors). Please note this is the OLDER version of T5, not the one that is more commonly used with other models.
+
+This model appears more sensitive to fp8 / quantization than most models. float8_e4m3fn WILL NOT work well. If you are using fp8 transformer, use float8_e5m2 as in the config above. Probably avoid using fp8 on the 2B model if you can. float8_e5m2 on the 14B transformer seems fine, and is required for training on a 24GB GPU.
+
+float8_e5m2 is also the only fp8 datatype that works for inference (as of this writing). But beware, in ComfyUI, **LoRAs don't work well when applied on a float8_e5m2 model**. The generated images are very noisy. I guess the stochastic rounding when merging the LoRA weights with this datatype just introduces too much noise. You will need to use LoRAs with full bf16 precision for inference. This issue doesn't affect training because the LoRA weights are separate and not merged during training. TLDR: you can use ```transformer_dtype = 'float8_e5m2'``` for training LoRAs for the 14B, but don't use fp8 on this model when applying LoRAs in ComfyUI.
+
+Cosmos-Predict2 LoRAs are saved in ComfyUI format.
