@@ -319,6 +319,9 @@ if __name__ == '__main__':
     elif model_type == 'cosmos_predict2':
         from models import cosmos_predict2
         model = cosmos_predict2.CosmosPredict2Pipeline(config)
+    elif model_type == 'omnigen2':
+        from models import omnigen2
+        model = omnigen2.OmniGen2Pipeline(config)
     else:
         raise NotImplementedError(f'Model type {model_type} is not implemented')
 
