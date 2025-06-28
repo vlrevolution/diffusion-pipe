@@ -1,7 +1,7 @@
 # diffusion-pipe
 A pipeline parallel training script for diffusion models.
 
-Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2.
+Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2, OmniGen2.
 
 **Work in progress.** This is a side project for me and my time is limited. I will try to add new models and features when I can.
 
@@ -15,6 +15,9 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - Easily add new models by implementing a single subclass
 
 ## Recent changes
+- 2025-06-27
+  - OmniGen2 LoRA training is supported, but only via standard t2i training.
+  - Refactored Cosmos-Predict2 implementation to align with other rectified flow models. The only effective change is that the loss weighting is slightly different.
 - 2025-06-14
   - Cosmos-Predict2 t2i LoRA training is supported. As usual, see the supported models doc for details.
   - Added option for using float8_e5m2 as the transformer_dtype.
@@ -38,9 +41,6 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - 2025-03-18
   - Add unsloth activation checkpointing. Reduces VRAM for a small performance hit.
   - Add partition_split option for manually controlling how layers are divided across multiple GPUs. Thanks @arczewski for the PR!
-- 2025-03-16
-  - Support loading any optimizer from the pytorch-optimizer library.
-  - Wan transformer and UMT5 can now be loaded from ComfyUI files. Thanks to @qiwang1996 for the PR!
 
 ## Windows support
 It will be difficult or impossible to make training work on native Windows. This is because Deepspeed only has [partial Windows support](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/README.md). Deepspeed is a hard requirement because the entire training script is built around Deepspeed pipeline parallelism. However, it will work on Windows Subsystem for Linux, specifically WSL 2. If you must use Windows I recommend trying WSL 2.

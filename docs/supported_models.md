@@ -12,7 +12,7 @@
 |Chroma          |✅    |✅              |✅                |
 |HiDream         |✅    |❌              |✅                |
 |SD3             |✅    |❌              |✅                |
-|Cosmos-Predict2 |✅    |❌              |✅                |
+|Cosmos-Predict2 |✅    |✅              |✅                |
 
 
 ## SDXL
@@ -250,12 +250,25 @@ dtype = 'bfloat16'
 #transformer_dtype = 'float8_e5m2'
 ```
 
-Cosmos-Predict2 LoRA training is supported. Currently only for the t2i model variants.
+Cosmos-Predict2 supports LoRA and full fine tuning. Currently only for the t2i model variants.
 
 Set transformer_path to the original model checkpoint, vae_path to the ComfyUI Wan VAE, and t5_path to the ComfyUI [old T5 model file](https://huggingface.co/comfyanonymous/cosmos_1.0_text_encoder_and_VAE_ComfyUI/blob/main/text_encoders/oldt5_xxl_fp16.safetensors). Please note this is the OLDER version of T5, not the one that is more commonly used with other models.
 
 This model appears more sensitive to fp8 / quantization than most models. float8_e4m3fn WILL NOT work well. If you are using fp8 transformer, use float8_e5m2 as in the config above. Probably avoid using fp8 on the 2B model if you can. float8_e5m2 on the 14B transformer seems fine, and is required for training on a 24GB GPU.
 
-float8_e5m2 is also the only fp8 datatype that works for inference (as of this writing). But beware, in ComfyUI, **LoRAs don't work well when applied on a float8_e5m2 model**. The generated images are very noisy. I guess the stochastic rounding when merging the LoRA weights with this datatype just introduces too much noise. You will need to use LoRAs with full bf16 precision for inference. This issue doesn't affect training because the LoRA weights are separate and not merged during training. TLDR: you can use ```transformer_dtype = 'float8_e5m2'``` for training LoRAs for the 14B, but don't use fp8 on this model when applying LoRAs in ComfyUI.
+float8_e5m2 is also the only fp8 datatype that works for inference (as of this writing). But beware, in ComfyUI, **LoRAs don't work well when applied on a float8_e5m2 model**. The generated images are very noisy. I guess the stochastic rounding when merging the LoRA weights with this datatype just introduces too much noise. This issue doesn't affect training because the LoRA weights are separate and not merged during training. TLDR: you can use ```transformer_dtype = 'float8_e5m2'``` for training LoRAs for the 14B, but don't use fp8 on this model when applying LoRAs in ComfyUI. UPDATE: LoRAs will work fine for inference using GGUF model weights, because in that case the LoRAs aren't merged into the quantized weights.
 
 Cosmos-Predict2 LoRAs are saved in ComfyUI format.
+
+## OmniGen2
+```
+[model]
+type = 'omnigen2'
+diffusers_path = '/data2/imagegen_models/OmniGen2'
+dtype = 'bfloat16'
+#flux_shift = true
+```
+
+OmniGen2 LoRA training is supported. Set ```diffusers_path``` to the original model checkpoint directory. Only t2i training (i.e. single image and caption) is supported.
+
+OmniGen2 LoRAs are saved in ComfyUI format.
