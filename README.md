@@ -65,9 +65,9 @@ conda create -n diffusion-pipe python=3.12
 conda activate diffusion-pipe
 ```
 
-Install PyTorch first. As of this writing (May 5, 2025), you need PyTorch 2.6.0 CUDA 12.4 version (or earlier) for flash attention to work:
+Install PyTorch first. It is not listed in the requirements file, because certain GPUs sometimes need different versions of PyTorch or CUDA, and you might have to find a combination that works for your hardware. As of this writing (July 1, 2025), the latest stable PyTorch 2.7.1 with CUDA 12.8 works on my 4090, and is also compatible with the latest flash-attn 2.8.0.post2:
 ```
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 Install nvcc: https://anaconda.org/nvidia/cuda-nvcc. Probably try to make it match the CUDA version of PyTorch.
