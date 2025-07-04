@@ -435,6 +435,7 @@ class WanPipeline(BasePipeline):
             for name, p in self.text_encoder.model.named_parameters():
                 if p.ndim == 2 and not ('token_embedding' in name or 'pos_embedding' in name):
                     p.data = p.data.to(torch.float8_e4m3fn)
+        self.text_encoder.model.requires_grad_(False)
 
         # Same here, this isn't a nn.Module.
         self.vae = WanVAE(
