@@ -72,6 +72,11 @@ class PreprocessMediaFile:
         self.round_frames = round_frames
         if self.support_video:
             assert self.framerate
+        self.tarfile_map = {}
+
+    def __del__(self):
+        for tar_f in self.tarfile_map.values():
+            tar_f.close()
 
     def __call__(self, spec, mask_filepath, size_bucket=None):
         is_video = (Path(spec[1]).suffix in VIDEO_EXTENSIONS)
@@ -80,7 +85,8 @@ class PreprocessMediaFile:
             tar_f = None
             file_obj = open(spec[1], 'rb')
         else:
-            tar_f = tarfile.TarFile(spec[0])
+            tar_filename = spec[0]
+            tar_f = self.tarfile_map.setdefault(tar_filename, tarfile.TarFile(tar_filename))
             file_obj = tar_f.extractfile(str(spec[1]))
 
         if is_video:
@@ -129,8 +135,6 @@ class PreprocessMediaFile:
             resized_video[i, ...] = self.pil_to_tensor(cropped_image)
 
         file_obj.close()
-        if tar_f:
-            tar_f.close()
 
         if not self.support_video:
             return [(resized_video.squeeze(0), mask)]

@@ -260,6 +260,7 @@ if __name__ == '__main__':
 
     # needed for broadcasting Queue in dataset.py
     mp.current_process().authkey = b'afsaskgfdjh4'
+    torch.multiprocessing.current_process().authkey = b'afsaskgfdjh4'
 
     with open(args.config) as f:
         # Inline TOML tables are not pickleable, which messes up the multiprocessing dataset stuff. This is a workaround.
@@ -268,6 +269,8 @@ if __name__ == '__main__':
     set_config_defaults(config)
     common.AUTOCAST_DTYPE = config['model']['dtype']
     dataset_util.UNCOND_FRACTION = config.get('uncond_fraction', 0.0)
+    if map_num_proc := config.get('map_num_proc', None):
+        dataset_util.NUM_PROC = map_num_proc
 
     # Initialize distributed environment before deepspeed
     world_size, rank, local_rank = distributed_init(args)

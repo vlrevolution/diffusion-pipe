@@ -266,7 +266,7 @@ class ARBucketDataset:
             w = round_to_nearest_multiple(w, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             h = round_to_nearest_multiple(h, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             size_bucket = (w, h, self.ar_frames[1])
-            metadata_with_size_bucket = self.metadata_dataset.map(lambda example: {'size_bucket': size_bucket}, keep_in_memory=True, desc='Adding size bucket')
+            metadata_with_size_bucket = self.metadata_dataset.map(lambda example: {'size_bucket': size_bucket}, num_proc=NUM_PROC, keep_in_memory=True, desc='Adding size bucket')
             self.size_buckets.append(
                 SizeBucketDataset(metadata_with_size_bucket, directory_config, size_bucket, model_name)
             )
@@ -558,7 +558,7 @@ class DirectoryDataset:
                 file_obj = open(image_file, 'rb')
             else:
                 tar_filename = image_spec[0]
-                tar_f = tarfile_map.setdefault(tar_filename, tarfile.TarFile(image_spec[0]))
+                tar_f = tarfile_map.setdefault(tar_filename, tarfile.TarFile(tar_filename))
                 file_obj = tar_f.extractfile(str(image_file))
 
             if image_file.suffix == '.webp':
@@ -863,9 +863,8 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         results = defaultdict(list)
         for i in range(0, len(tensors_and_masks), caching_batch_size):
             tensors = [t[0] for t in tensors_and_masks[i:i+caching_batch_size]]
-            batched = torch.stack(tensors)
-            parent_conn, child_conn = mp.Pipe(duplex=False)
-            queue.put((0, batched, child_conn))
+            parent_conn, child_conn = torch.multiprocessing.Pipe(duplex=False)
+            queue.put((0, torch.stack(tensors), child_conn))
             result = parent_conn.recv()  # dict
             for k, v in result.items():
                 results[k].append(v)
@@ -921,7 +920,7 @@ class DatasetManager:
     # which has basically the same API, and everything works perfectly. ¯\_(ツ)_/¯
     def cache(self, unload_models=True):
         if is_main_process():
-            manager = mp.Manager()
+            manager = torch.multiprocessing.Manager()
             queue = [manager.Queue()]
         else:
             queue = [None]
