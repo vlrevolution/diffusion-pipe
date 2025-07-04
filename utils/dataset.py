@@ -64,6 +64,15 @@ def process_caption_fn(shuffle_tags=False, caption_prefix=''):
     return fn
 
 
+def bucket_suffix(key):
+    if len(key) == 2:
+        return f'{key[0]:.3f}_{key[1]}'
+    elif len(key) == 3:
+        return f'{key[0]}x{key[1]}x{key[2]}'
+    else:
+        raise RuntimeError(f'Unexpected bucket: {key}')
+
+
 def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerprint_args=None, regenerate_cache=False, caching_batch_size=1):
     # Do the fingerprinting ourselves, because otherwise map() does it by serializing the map function.
     # That goes poorly when the function is capturing huge models (slow, OOMs, etc).
@@ -131,7 +140,7 @@ class SizeBucketDataset:
         self.size_bucket = size_bucket
         self.model_name = model_name
         self.path = Path(self.directory_config['path'])
-        self.cache_dir = self.path / 'cache' / self.model_name / f'cache_{size_bucket[0]}x{size_bucket[1]}x{size_bucket[2]}'
+        self.cache_dir = self.path / 'cache' / self.model_name / f'cache_{bucket_suffix(size_bucket)}'
         os.makedirs(self.cache_dir, exist_ok=True)
         self.text_embedding_datasets = []
         self.uncond_text_embeddings = []
@@ -247,7 +256,7 @@ class ARBucketDataset:
         self.model_name = model_name
         self.size_buckets = []
         self.path = Path(directory_config['path'])
-        self.cache_dir = self.path / 'cache' / self.model_name / f'ar_frames_{self.ar_frames[0]:.3f}_{self.ar_frames[1]}'
+        self.cache_dir = self.path / 'cache' / self.model_name / f'ar_frames_{bucket_suffix(self.ar_frames)}'
         os.makedirs(self.cache_dir, exist_ok=True)
 
         for res in resolutions:
@@ -257,7 +266,7 @@ class ARBucketDataset:
             w = round_to_nearest_multiple(w, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             h = round_to_nearest_multiple(h, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             size_bucket = (w, h, self.ar_frames[1])
-            metadata_with_size_bucket = self.metadata_dataset.map(lambda example: {'size_bucket': size_bucket}, keep_in_memory=True)
+            metadata_with_size_bucket = self.metadata_dataset.map(lambda example: {'size_bucket': size_bucket}, keep_in_memory=True, desc='Adding size bucket')
             self.size_buckets.append(
                 SizeBucketDataset(metadata_with_size_bucket, directory_config, size_bucket, model_name)
             )
@@ -294,10 +303,12 @@ class DirectoryDataset:
             # sort size bucket from longest frame length to shortest
             self.size_buckets.sort(key=lambda t: t[-1], reverse=True)
             self.size_buckets = np.array(self.size_buckets)
+            self.size_bucket_datasets = []
         else:
             self.resolutions = self._process_user_provided_resolutions(
                 directory_config.get('resolutions', dataset_config['resolutions'])
             )
+            self.ar_bucket_datasets = []
         self.shuffle = directory_config.get('cache_shuffle_num', dataset_config.get('cache_shuffle_num', 0))
         self.directory_config['cache_shuffle_num'] = self.shuffle # Make accessible if it wasn't yet, for picking one out
         self.shuffle_delimiter = directory_config.get('cache_shuffle_delimiter', dataset_config.get('cache_shuffle_delimiter', ", "))
@@ -306,6 +317,7 @@ class DirectoryDataset:
         # For testing. Default if a mask is missing.
         self.default_mask_file = Path(self.directory_config['default_mask_file']) if 'default_mask_file' in self.directory_config else None
         self.cache_dir = self.path / 'cache' / self.model_name
+        self.grouping_keys_json_file = self.cache_dir / 'metadata/grouping_keys.json'
 
         if not self.path.exists() or not self.path.is_dir():
             raise RuntimeError(f'Invalid path: {self.path}')
@@ -343,10 +355,96 @@ class DirectoryDataset:
             quit()
 
     def cache_metadata(self, regenerate_cache=False):
+        def check_grouped_metadata():
+            all_grouped_metadata_exists = False
+            unique_grouping_keys = None
+            if self.grouping_keys_json_file.exists():
+                with open(self.grouping_keys_json_file) as f:
+                    unique_grouping_keys = json.load(f)
+                if self.use_size_buckets and not all(len(key) == 3 for key in unique_grouping_keys):
+                    # Using size buckets but have AR keys.
+                    return False, unique_grouping_keys
+                elif not all(len(key) == 2 for key in unique_grouping_keys):
+                    # Using AR buckets but have size bucket keys
+                    return False, unique_grouping_keys
+                all_grouped_metadata_exists = all(
+                    (self.cache_dir / f'metadata/grouped_metadata_{bucket_suffix(key)}').exists()
+                    for key in unique_grouping_keys
+                )
+            return all_grouped_metadata_exists, unique_grouping_keys
+
+        # Check if all the grouped metadata datasets exist. If so, we can directly load them.
+        all_grouped_metadata_exists, unique_grouping_keys = check_grouped_metadata()
+        if not all_grouped_metadata_exists:
+            # Otherwise, need to compute the ungrouped metadata and then group.
+            print('Grouped metadata is not cached. Computing ungrouped metadata and then grouping.')
+            unique_grouping_keys = self._group_metadata_and_save_to_disk(regenerate_cache=regenerate_cache)
+        else:
+            print('Found grouped metadata cache. Directly loading it.')
+
+        for grouping_key in unique_grouping_keys:
+            grouped_cache_dir = self.cache_dir / f'metadata/grouped_metadata_{bucket_suffix(grouping_key)}'
+            print(f'Loading grouped metadata with grouping key {grouping_key}')
+            metadata = datasets.load_from_disk(grouped_cache_dir)
+            if self.use_size_buckets:
+                assert len(grouping_key) == 3
+                self.size_bucket_datasets.append(
+                    SizeBucketDataset(
+                        metadata,
+                        self.directory_config,
+                        grouping_key,
+                        self.model_name,
+                    )
+                )
+            else:
+                self.ar_bucket_datasets.append(
+                    ARBucketDataset(
+                        grouping_key,
+                        self.resolutions,
+                        metadata,
+                        self.directory_config,
+                        self.model_name,
+                    )
+                )
+
+    def _group_metadata_and_save_to_disk(self, regenerate_cache=False):
+        metadata_dataset = self._get_ungrouped_metadata(regenerate_cache=regenerate_cache)
+        grouped_metadata = defaultdict(lambda: defaultdict(list))
+        unique_grouping_keys = set()
+        for example in tqdm(metadata_dataset, desc='Grouping examples'):
+            if self.use_size_buckets:
+                grouping_key = tuple(example['size_bucket'])
+            else:
+                grouping_key = example['ar_bucket']
+                grouping_key = (grouping_key[0], int(grouping_key[1]))
+            unique_grouping_keys.add(grouping_key)
+            d = grouped_metadata[grouping_key]
+            for k, v in example.items():
+                d[k].append(v)
+        unique_grouping_keys = list(unique_grouping_keys)
+
+        with open(self.grouping_keys_json_file, 'w') as f:
+            json.dump(unique_grouping_keys, f)
+
+        if self.use_size_buckets:
+            for size_bucket, metadata in grouped_metadata.items():
+                metadata = datasets.Dataset.from_dict(metadata)
+                grouped_cache_dir = self.cache_dir / f'metadata/grouped_metadata_{bucket_suffix(size_bucket)}'
+                metadata.save_to_disk(grouped_cache_dir)
+        else:
+            for ar_bucket, metadata in grouped_metadata.items():
+                metadata = datasets.Dataset.from_dict(metadata)
+                grouped_cache_dir = self.cache_dir / f'metadata/grouped_metadata_{bucket_suffix(ar_bucket)}'
+                metadata.save_to_disk(grouped_cache_dir)
+        return unique_grouping_keys
+
+    def _get_ungrouped_metadata(self, regenerate_cache=False):
+        # This method caches some intermediate datasets so we don't have to enumerate all the files each time.
         metadata_cache_file_1 = self.cache_dir / f'metadata/metadata_intermediate'
         metadata_cache_file_2 = self.cache_dir / f'metadata/metadata.arrow'
 
         if regenerate_cache or not metadata_cache_file_1.exists():
+            print('Intermediate metadata is not cached. Enumerating all files.')
             files = list(self.path.glob('*'))
             # deterministic order
             files.sort()
@@ -366,7 +464,6 @@ class DirectoryDataset:
             image_specs = []
             caption_files = []
             mask_files = []
-            print('Enumerating files')
             for file in tqdm(files):
                 if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet':
                     continue
@@ -411,10 +508,11 @@ class DirectoryDataset:
             metadata_dataset = metadata_dataset.shuffle(seed=seed)
             metadata_dataset.save_to_disk(metadata_cache_file_1)
         else:
+            print('Found intermediate metadata cache. Directly loading it.')
             metadata_dataset = datasets.load_from_disk(metadata_cache_file_1)
 
         metadata_map_fn = self._metadata_map_fn()
-        print('caching metadata')
+        print('Caching ungrouped metadata.')
         metadata_dataset = metadata_dataset.map(
             metadata_map_fn,
             cache_file_name=str(metadata_cache_file_2),
@@ -424,43 +522,7 @@ class DirectoryDataset:
             num_proc=NUM_PROC,
             remove_columns=metadata_dataset.column_names,
         )
-
-        grouped_metadata = defaultdict(lambda: defaultdict(list))
-        for example in tqdm(metadata_dataset, desc='Grouping examples'):
-            if self.use_size_buckets:
-                grouping_key = tuple(example['size_bucket'])
-            else:
-                grouping_key = example['ar_bucket']
-                grouping_key = (grouping_key[0], int(grouping_key[1]))
-            d = grouped_metadata[grouping_key]
-            for k, v in example.items():
-                d[k].append(v)
-
-        if self.use_size_buckets:
-            self.size_bucket_datasets = []
-            for size_bucket, metadata in grouped_metadata.items():
-                metadata = datasets.Dataset.from_dict(metadata)
-                self.size_bucket_datasets.append(
-                    SizeBucketDataset(
-                        metadata,
-                        self.directory_config,
-                        size_bucket,
-                        self.model_name,
-                    )
-                )
-        else:
-            self.ar_bucket_datasets = []
-            for ar_bucket, metadata in grouped_metadata.items():
-                metadata = datasets.Dataset.from_dict(metadata)
-                self.ar_bucket_datasets.append(
-                    ARBucketDataset(
-                        ar_bucket,
-                        self.resolutions,
-                        metadata,
-                        self.directory_config,
-                        self.model_name,
-                    )
-                )
+        return metadata_dataset
 
     def _set_defaults(self, directory_config, dataset_config):
         directory_config.setdefault('enable_ar_bucket', dataset_config.get('enable_ar_bucket', False))
