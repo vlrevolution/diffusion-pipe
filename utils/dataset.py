@@ -17,6 +17,7 @@ from datasets.fingerprint import Hasher
 from PIL import Image
 import imageio
 import multiprocess as mp
+from tqdm import tqdm
 
 from utils.common import is_main_process, VIDEO_EXTENSIONS, round_to_nearest_multiple
 
@@ -24,7 +25,9 @@ from utils.common import is_main_process, VIDEO_EXTENSIONS, round_to_nearest_mul
 DEBUG = False
 IMAGE_SIZE_ROUND_TO_MULTIPLE = 32
 NUM_PROC = min(8, os.cpu_count())
+CAPTIONS_JSON_FILE = 'captions.json'
 
+# TODO: make configurable
 UNCOND_FRACTION = 0.0
 
 
@@ -340,53 +343,81 @@ class DirectoryDataset:
             quit()
 
     def cache_metadata(self, regenerate_cache=False):
-        files = list(self.path.glob('*'))
-        # deterministic order
-        files.sort()
+        metadata_cache_file_1 = self.cache_dir / f'metadata/metadata_intermediate'
+        metadata_cache_file_2 = self.cache_dir / f'metadata/metadata.arrow'
 
-        # Mask can have any extension, it just needs to have the same stem as the image.
-        mask_file_stems = {path.stem: path for path in self.mask_path.glob('*') if path.is_file()} if self.mask_path is not None else {}
+        if regenerate_cache or not metadata_cache_file_1.exists():
+            files = list(self.path.glob('*'))
+            # deterministic order
+            files.sort()
 
-        def process_file(file):
-            if file.suffix != '.tar':
-                return [(None, str(file))]
-            with tarfile.TarFile(file) as tar_f:
-                return [(str(file), name) for name in tar_f.getnames()]
+            # Mask can have any extension, it just needs to have the same stem as the image.
+            mask_file_stems = {path.stem: path for path in self.mask_path.glob('*') if path.is_file()} if self.mask_path is not None else {}
 
-        image_specs = []
-        caption_files = []
-        mask_files = []
-        for file in files:
-            if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet':
-                continue
-            for image_spec in process_file(file):
-                image_file = Path(image_spec[1])
-                caption_file = image_file.with_suffix('.txt')
-                if not os.path.exists(caption_file):
-                    caption_file = ''
-                image_specs.append(image_spec)
-                caption_files.append(str(caption_file))
-                if image_file.stem in mask_file_stems:
-                    mask_files.append(str(mask_file_stems[image_file.stem]))
-                elif self.default_mask_file is not None:
-                    mask_files.append(str(self.default_mask_file))
-                else:
-                    if self.mask_path is not None:
-                        logger.warning(f'No mask file was found for image {image_file}, not using mask.')
-                    mask_files.append(None)
-        assert len(image_specs) > 0, f'Directory {self.path} had no images/videos!'
+            def process_file(file):
+                if file.suffix != '.tar':
+                    return [(None, str(file))]
+                with tarfile.TarFile(file) as tar_f:
+                    return [(str(file), name) for name in tar_f.getnames()]
 
-        metadata_dataset = datasets.Dataset.from_dict({'image_spec': image_specs, 'caption_file': caption_files, 'mask_file': mask_files})
-        # Shuffle the data. Use a deterministic seed, so the dataset is identical on all processes.
-        # Seed is based on the hash of the directory path, so that if directories have the same set of images, they are shuffled differently.
-        seed = int(hashlib.md5(str.encode(str(self.path))).hexdigest(), 16) % int(1e9)
-        metadata_dataset = metadata_dataset.shuffle(seed=seed)
+            captions_json = self.path / CAPTIONS_JSON_FILE
+            has_captions_json = captions_json.exists()
+
+            image_specs = []
+            caption_files = []
+            mask_files = []
+            print('Enumerating files')
+            for file in tqdm(files):
+                if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet':
+                    continue
+                for image_spec in process_file(file):
+                    image_file = Path(image_spec[1])
+                    caption_file = image_file.with_suffix('.txt')
+                    if has_captions_json or not os.path.exists(caption_file):
+                        caption_file = ''
+                    image_specs.append(image_spec)
+                    caption_files.append(str(caption_file))
+                    if image_file.stem in mask_file_stems:
+                        mask_files.append(str(mask_file_stems[image_file.stem]))
+                    elif self.default_mask_file is not None:
+                        mask_files.append(str(self.default_mask_file))
+                    else:
+                        if self.mask_path is not None:
+                            logger.warning(f'No mask file was found for image {image_file}, not using mask.')
+                        mask_files.append(None)
+            assert len(image_specs) > 0, f'Directory {self.path} had no images/videos!'
+
+            metadata_dataset = datasets.Dataset.from_dict({'image_spec': image_specs, 'caption_file': caption_files, 'mask_file': mask_files})
+
+            if captions_json.exists():
+                print('Loading captions JSON')
+                with open(captions_json) as f:
+                    caption_data = json.load(f)
+
+                def add_captions(example):
+                    captions = caption_data.get(image_file.name, None)
+                    if captions is None:
+                        logger.warning(f'Image file {image_file} does not have an entry in captions.json')
+                    else:
+                        assert isinstance(captions, list), 'captions.json must contain lists of captions'
+                    return {'caption': captions}
+
+                metadata_dataset = metadata_dataset.map(add_captions, keep_in_memory=True, desc='Adding captions')
+                del caption_data
+
+            # Shuffle the data. Use a deterministic seed, so the dataset is identical on all processes.
+            # Seed is based on the hash of the directory path, so that if directories have the same set of images, they are shuffled differently.
+            seed = int(hashlib.md5(str.encode(str(self.path))).hexdigest(), 16) % int(1e9)
+            metadata_dataset = metadata_dataset.shuffle(seed=seed)
+            metadata_dataset.save_to_disk(metadata_cache_file_1)
+        else:
+            metadata_dataset = datasets.load_from_disk(metadata_cache_file_1)
+
         metadata_map_fn = self._metadata_map_fn()
-        fingerprint = Hasher.hash([metadata_dataset._fingerprint, metadata_map_fn])
         print('caching metadata')
         metadata_dataset = metadata_dataset.map(
             metadata_map_fn,
-            cache_file_name=str(self.cache_dir / f'metadata/metadata_{fingerprint}.arrow'),
+            cache_file_name=str(metadata_cache_file_2),
             load_from_cache_file=(not regenerate_cache),
             batched=True,
             batch_size=1,
@@ -395,7 +426,7 @@ class DirectoryDataset:
         )
 
         grouped_metadata = defaultdict(lambda: defaultdict(list))
-        for example in metadata_dataset:
+        for example in tqdm(metadata_dataset, desc='Grouping examples'):
             if self.use_size_buckets:
                 grouping_key = tuple(example['size_bucket'])
             else:
@@ -438,12 +469,7 @@ class DirectoryDataset:
         directory_config.setdefault('num_repeats', dataset_config.get('num_repeats', 1))
 
     def _metadata_map_fn(self):
-        captions_file = self.path / 'captions.json'
-        if captions_file.exists():
-            with open(captions_file) as f:
-                caption_data = json.load(f)
-        else:
-            caption_data = None
+        tarfile_map = {}
 
         def fn(example):
             # batch size always 1
@@ -451,12 +477,9 @@ class DirectoryDataset:
             image_spec = example['image_spec'][0]
             image_file = Path(image_spec[1])
             captions = None
-            if caption_data is not None:
-                captions = caption_data.get(image_file.name, None)
-                if captions is None:
-                    logger.warning(f'Image file {image_file} does not have an entry in captions.json')
-                else:
-                    assert isinstance(captions, list), 'captions.json must contain lists of captions'
+            if 'caption' in example:
+                # Already put in dataset from captions.json file.
+                captions = example['caption']
             if captions is None and caption_file:
                 with open(caption_file) as f:
                     captions = [f.read().strip()]
@@ -472,7 +495,8 @@ class DirectoryDataset:
                 tar_f = None
                 file_obj = open(image_file, 'rb')
             else:
-                tar_f = tarfile.TarFile(image_spec[0])
+                tar_filename = image_spec[0]
+                tar_f = tarfile_map.setdefault(tar_filename, tarfile.TarFile(image_spec[0]))
                 file_obj = tar_f.extractfile(str(image_file))
 
             if image_file.suffix == '.webp':
@@ -504,8 +528,6 @@ class DirectoryDataset:
                 return empty_return
             finally:
                 file_obj.close()
-                if tar_f:
-                    tar_f.close()
 
             is_video = (frames > 1)
             log_ar = np.log(width / height)
