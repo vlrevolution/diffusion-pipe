@@ -88,7 +88,9 @@ def set_config_defaults(config):
 
     config.setdefault('pipeline_stages', 1)
     config.setdefault('activation_checkpointing', False)
-    config['reentrant_activation_checkpointing'] = (config['activation_checkpointing'] == 'unsloth')
+    config.setdefault('reentrant_activation_checkpointing', False)
+    if config['activation_checkpointing'] == 'unsloth':
+        config['reentrant_activation_checkpointing'] = True
     config.setdefault('warmup_steps', 0)
     if 'save_dtype' in config:
         config['save_dtype'] = DTYPE_MAP[config['save_dtype']]
@@ -498,7 +500,7 @@ if __name__ == '__main__':
             # weights end up on CPU where they shouldn't. Why? Are we giving anything up by not using the Deepspeed implementation?
             #checkpoint_func = deepspeed.checkpointing.non_reentrant_checkpoint
             from functools import partial
-            checkpoint_func = partial(torch.utils.checkpoint.checkpoint, use_reentrant=False)
+            checkpoint_func = partial(torch.utils.checkpoint.checkpoint, use_reentrant=config['reentrant_activation_checkpointing'])
         elif activation_checkpointing == 'unsloth':
             checkpoint_func = unsloth_checkpoint
         else:
