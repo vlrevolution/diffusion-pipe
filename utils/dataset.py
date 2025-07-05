@@ -27,7 +27,6 @@ IMAGE_SIZE_ROUND_TO_MULTIPLE = 32
 NUM_PROC = min(8, os.cpu_count())
 CAPTIONS_JSON_FILE = 'captions.json'
 
-# TODO: make configurable
 UNCOND_FRACTION = 0.0
 
 
@@ -266,7 +265,7 @@ class ARBucketDataset:
             w = round_to_nearest_multiple(w, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             h = round_to_nearest_multiple(h, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             size_bucket = (w, h, self.ar_frames[1])
-            metadata_with_size_bucket = self.metadata_dataset.map(lambda example: {'size_bucket': size_bucket}, num_proc=NUM_PROC, keep_in_memory=True, desc='Adding size bucket')
+            metadata_with_size_bucket = self.metadata_dataset.map(lambda example: {'size_bucket': size_bucket}, keep_in_memory=True, desc='Adding size bucket')
             self.size_buckets.append(
                 SizeBucketDataset(metadata_with_size_bucket, directory_config, size_bucket, model_name)
             )
