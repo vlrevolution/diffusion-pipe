@@ -48,21 +48,6 @@ def shuffle_captions(captions: list[str], count: int = 0, delimiter: str = ', ',
     return [caption_prefix + shuffle_caption(caption, delimiter) for caption in captions for _ in range(count)]
 
 
-def process_caption_fn(shuffle_tags=False, caption_prefix=''):
-    def fn(example):
-        with open(example['caption_file']) as f:
-            caption = f.read().strip()
-        if shuffle_tags:
-            tags = [tag.strip() for tag in caption.split(',')]
-            random.shuffle(tags)
-            caption = ', '.join(tags)
-        caption = caption_prefix + caption
-
-        example['caption'] = caption
-        return example
-    return fn
-
-
 def bucket_suffix(key):
     if len(key) == 2:
         return f'{key[0]:.3f}_{key[1]}'
@@ -540,7 +525,7 @@ class DirectoryDataset:
             captions = None
             if 'caption' in example:
                 # Already put in dataset from captions.json file.
-                captions = example['caption']
+                captions = example['caption'][0]
             if captions is None and caption_file:
                 with open(caption_file) as f:
                     captions = [f.read().strip()]
