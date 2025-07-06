@@ -198,6 +198,7 @@ class GenericOptim(Optimizer):
             momentum_type: str = "ema",
             second_moment_type: str = "ema",
             correct_dim=False,
+            cpu_kahan=False,
     ):
         self.momentum_type = momentum_type
         assert self.momentum_type in ["ema", "sm", "none"]
@@ -213,12 +214,13 @@ class GenericOptim(Optimizer):
             raise ValueError(f"Invalid beta parameter: {betas[1]} - should be in [0.0, 1.0]")
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
-        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim}
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim, 'cpu_kahan': cpu_kahan}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
-              f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}")
+              f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
+              f"cpu_kahan={cpu_kahan}")
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -280,19 +282,27 @@ class GenericOptim(Optimizer):
                 if group["weight_decay"] > 0.0:
                     update.add_(p, alpha=(-group["lr"] * group["weight_decay"]))
 
+                cpu_kahan = group['cpu_kahan']
+
                 if p.dtype == torch.bfloat16:
                     # Kahan summation for bfloat16
+                    shift_device = 'cpu' if cpu_kahan else p.device
                     if 'shift' not in state:
-                        state['shift'] = torch.zeros_like(p)
-                    shift = state['shift']
+                        state['shift'] = torch.zeros_like(p, device=shift_device)
+                    shift = state['shift'].to(p.device, non_blocking=True)
                     shift.add_(update)
                     # Use grad as temp buffer
                     p.grad.copy_(p.detach())
                     p.add_(shift)
                     shift.add_(p.grad.sub_(p))
+                    # TODO: non_blocking=True here causes CUDA error on first step after checkpoint save.
+                    state['shift'] = shift.to(shift_device)
                 else:
                     p.add_(update)
 
+        # if cpu_kahan:
+        #     # Because we did non_blocking transfer in GPU -> CPU direction
+        #     torch.cuda.synchronize()
         return loss
 
     def get_numerator(self, group, state, p):
