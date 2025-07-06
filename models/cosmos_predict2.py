@@ -158,7 +158,14 @@ def _compute_text_embeddings(text_encoder, input_ids, attn_mask):
     lengths = attn_mask.sum(dim=1).cpu()
 
     for batch_id in range(encoded_text.shape[0]):
-        encoded_text[batch_id][lengths[batch_id] :] = 0
+        length = lengths[batch_id]
+        # This is tricky. Based on Nvidia's official code, when the prompt is '' or when dropping out text embeddings,
+        # the embeddings are zeroed out completely. But the attention mask for an empty string looks like
+        # [1, 0, 0, ...] because of the BOS token. So it's not zeroed out unless we explicitly set length to 0 here.
+        # If you don't do this, training on unconditional text embeddings will NaN the loss pretty quickly.
+        if length == 1:
+            length = 0
+        encoded_text[batch_id][length:] = 0
 
     return encoded_text
 
