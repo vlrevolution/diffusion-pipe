@@ -144,7 +144,7 @@ class SizeBucketDataset:
             caching_batch_size=caching_batch_size,
         )
         iteration_order = []
-        for example in self.latent_dataset.select_columns(['image_spec', 'caption']):
+        for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
             image_spec = example['image_spec']
             captions = example['caption']
             for i, caption in enumerate([captions[i:i + self.shuffle_skip] for i in range(0, len(captions), self.shuffle_skip)]):
@@ -476,7 +476,7 @@ class DirectoryDataset:
                     caption_data = json.load(f)
 
                 def add_captions(example):
-                    captions = caption_data.get(image_file.name, None)
+                    captions = caption_data.get(example['image_spec'][1], None)
                     if captions is None:
                         logger.warning(f'Image file {image_file} does not have an entry in captions.json')
                     else:
@@ -490,10 +490,14 @@ class DirectoryDataset:
             # Seed is based on the hash of the directory path, so that if directories have the same set of images, they are shuffled differently.
             seed = int(hashlib.md5(str.encode(str(self.path))).hexdigest(), 16) % int(1e9)
             metadata_dataset = metadata_dataset.shuffle(seed=seed)
+            print('Saving intermediate metadata dataset.')
             metadata_dataset.save_to_disk(metadata_cache_file_1)
-        else:
-            print('Found intermediate metadata cache. Directly loading it.')
-            metadata_dataset = datasets.load_from_disk(metadata_cache_file_1)
+            # Need to delete and load from disk, or else the map() call below is extremely slow to launch worker processes
+            # and they use huge amounts of memory. Probably because this dataset is in memory?
+            del metadata_dataset
+
+        print('Loading intermediate metadata dataset.')
+        metadata_dataset = datasets.load_from_disk(metadata_cache_file_1)
 
         metadata_map_fn = self._metadata_map_fn()
         print('Caching ungrouped metadata.')
