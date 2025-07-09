@@ -132,6 +132,13 @@ eps = 1e-8
 # weight_decay = 0.01
 # stabilize = false
 
+# Automagic optimizer from AI-Toolkit.
+# In my experience, this gives slightly worse results than AdamW with a properly tuned LR, but you can try it.
+
+# [optimizer]
+# type = 'automagic'
+# weight_decay = 0.01
+
 # Any optimizer not explicitly supported will be dynamically loaded from the pytorch-optimizer library.
 # [optimizer]
 # type = 'Prodigy'
