@@ -31,6 +31,9 @@ from utils.patches import apply_patches
 from utils.unsloth_utils import unsloth_checkpoint
 from utils.pipeline import ManualPipelineModule
 
+# needed for broadcasting Queue in dataset.py
+mp.current_process().authkey = b'afsaskgfdjh4'
+
 wandb_enable = False
 
 TIMESTEP_QUANTILES_FOR_EVAL = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -257,10 +260,6 @@ def _get_automagic_lrs(optimizer):
 
 if __name__ == '__main__':
     apply_patches()
-
-    # needed for broadcasting Queue in dataset.py
-    mp.current_process().authkey = b'afsaskgfdjh4'
-    torch.multiprocessing.current_process().authkey = b'afsaskgfdjh4'
 
     with open(args.config) as f:
         # Inline TOML tables are not pickleable, which messes up the multiprocessing dataset stuff. This is a workaround.

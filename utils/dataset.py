@@ -851,7 +851,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         results = defaultdict(list)
         for i in range(0, len(tensors_and_masks), caching_batch_size):
             tensors = [t[0] for t in tensors_and_masks[i:i+caching_batch_size]]
-            parent_conn, child_conn = torch.multiprocessing.Pipe(duplex=False)
+            parent_conn, child_conn = mp.Pipe(duplex=False)
             queue.put((0, torch.stack(tensors), child_conn))
             result = parent_conn.recv()  # dict
             for k, v in result.items():
@@ -899,16 +899,12 @@ class DatasetManager:
         self.datasets.append(dataset)
 
     # Some notes for myself:
-    # Use a manager queue, since that can be pickled and unpickled, and sent to other processes.
-    # IMPORTANT: we use multiprocess library (not Python multiprocessing!) just like HF Datasets does.
-    # After hours of debugging and looking up related issues, I have concluded multiprocessing is outright bugged
-    # for this use case. Something about making a manager queue and sending it to the caching process, and then
-    # further sending it to map() workers via the pickled map function, is broken. It gets through a lot of the caching,
-    # but eventually, inevitably, queue.put() will fail with BrokenPipeError. Switching from multiprocessing to multiprocess,
-    # which has basically the same API, and everything works perfectly. ¯\_(ツ)_/¯
+    # Use the third-party multiprocess library because HF Datasets uses it for the map() calls.
+    # Mix and match native multiprocessing / torch.multiprocessing and multiprocess at your peril! Things can break.
+    # In patches.py we register reductions so Tensors sent over Queues and Pipes are efficient just like in torch.multiprocessing.
     def cache(self, unload_models=True):
         if is_main_process():
-            manager = torch.multiprocessing.Manager()
+            manager = mp.Manager()
             queue = [manager.Queue()]
         else:
             queue = [None]
