@@ -14,6 +14,11 @@ from torch.optim import Optimizer
 from transformers.utils.versions import require_version
 
 
+def has_inf_or_nan(x):
+    s = x.sum()
+    return s.isinf() or s.isnan()
+
+
 def get_and_update_subset_norm_denom(group, state, grad, beta2):
     # First, compute subset norm if applicable
     if "subset_size" in group:
@@ -234,12 +239,19 @@ class GenericOptim(Optimizer):
         if closure is not None:
             loss = closure()
 
+        synchronize = False
+        skipped_parameter_names = []
+
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:
                     continue
                 if p.grad.is_sparse:
                     raise RuntimeError("Currently does not support sparse gradients.")
+
+                if has_inf_or_nan(p.grad):
+                    skipped_parameter_names.append(getattr(p, 'original_name', None))
+                    continue
 
                 # Setup
                 state = self.state[p]
@@ -283,6 +295,7 @@ class GenericOptim(Optimizer):
                     update.add_(p, alpha=(-group["lr"] * group["weight_decay"]))
 
                 cpu_kahan = group['cpu_kahan']
+                synchronize |= cpu_kahan
 
                 if p.dtype == torch.bfloat16:
                     # Kahan summation for bfloat16
@@ -300,9 +313,13 @@ class GenericOptim(Optimizer):
                 else:
                     p.add_(update)
 
-        # if cpu_kahan:
-        #     # Because we did non_blocking transfer in GPU -> CPU direction
-        #     torch.cuda.synchronize()
+        if synchronize:
+            # Because we did non_blocking transfer in GPU -> CPU direction
+            torch.cuda.synchronize()
+
+        if len(skipped_parameter_names) > 0:
+            print(f'WARNING: the following parameters had their updates skipped due to Inf or NaN: {skipped_parameter_names}')
+
         return loss
 
     def get_numerator(self, group, state, p):
