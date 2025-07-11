@@ -14,7 +14,7 @@ from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
-from utils.common import AUTOCAST_DTYPE
+from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift
 from utils.offloading import ModelOffloader
 import wan
 from wan.modules.t5 import T5Encoder, T5Decoder, T5Model
@@ -606,6 +606,9 @@ class WanPipeline(BasePipeline):
 
         if shift := self.model_config.get('shift', None):
             t = (t * shift) / (1 + (shift - 1) * t)
+        elif self.model_config.get('flux_shift', False):
+            mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+            t = time_shift(mu, 1.0, t)
 
         x_1 = latents
         x_0 = torch.randn_like(x_1)
