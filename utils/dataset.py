@@ -75,6 +75,7 @@ def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerp
         batched=True,
         batch_size=caching_batch_size,
         num_proc=NUM_PROC,
+        with_rank=True,
     )
     dataset.set_format('torch')
     return dataset
@@ -832,7 +833,9 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
     for ds in datasets:
         ds.cache_metadata(regenerate_cache=regenerate_cache)
 
-    def latents_map_fn(example):
+    pipes = {}
+
+    def latents_map_fn(example, rank):
         first_size_bucket = example['size_bucket'][0]
         tensors_and_masks = []
         image_specs = []
@@ -851,7 +854,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         results = defaultdict(list)
         for i in range(0, len(tensors_and_masks), caching_batch_size):
             tensors = [t[0] for t in tensors_and_masks[i:i+caching_batch_size]]
-            parent_conn, child_conn = mp.Pipe(duplex=False)
+            parent_conn, child_conn = pipes.setdefault(rank, mp.Pipe(duplex=False))
             queue.put((0, torch.stack(tensors), child_conn))
             result = parent_conn.recv()  # dict
             for k, v in result.items():
@@ -868,8 +871,8 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
         ds.cache_latents(latents_map_fn, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
 
     for text_encoder_idx in range(num_text_encoders):
-        def text_embedding_map_fn(example):
-            parent_conn, child_conn = mp.Pipe(duplex=False)
+        def text_embedding_map_fn(example, rank):
+            parent_conn, child_conn = pipes.setdefault(rank, mp.Pipe(duplex=False))
             queue.put((text_encoder_idx+1, example['caption'], example['is_video'], child_conn))
             result = parent_conn.recv()  # dict
             result['image_spec'] = example['image_spec']
