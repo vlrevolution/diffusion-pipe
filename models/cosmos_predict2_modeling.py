@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Code has been modified slightly from the original, to simplify some things and
-# make it self contained in a single file without TransformerEngine dependency.
-
 import math
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -27,219 +24,226 @@ from torch import nn
 from torch.distributed import get_process_group_ranks
 from torchvision import transforms
 
+try:
+    import transformer_engine as te
+    from transformer_engine.pytorch.attention import DotProductAttention
+    from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
+    from transformer_engine.pytorch import RMSNorm
 
-def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
-    """Change sign so the last dimension becomes [-odd, +even]
+except Exception as e:
+    print('Importing TransformerEngine failed. Falling back to PyTorch SDPA. The import error was:')
+    print(e)
+    te = None
 
-    Args:
-        x: torch.Tensor. Input tensor.
-        interleaved: bool. Whether to use interleaved rotary position embedding.
+    def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
+        """Change sign so the last dimension becomes [-odd, +even]
 
-    Returns:
-        Tensor: Tensor rotated half.
-    """
-    if not interleaved:
-        x1, x2 = torch.chunk(x, 2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
+        Args:
+            x: torch.Tensor. Input tensor.
+            interleaved: bool. Whether to use interleaved rotary position embedding.
 
-    # interleaved
-    x1 = x[:, :, :, ::2]
-    x2 = x[:, :, :, 1::2]
-    x_new = torch.stack((-x2, x1), dim=-1)
-    return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
+        Returns:
+            Tensor: Tensor rotated half.
+        """
+        if not interleaved:
+            x1, x2 = torch.chunk(x, 2, dim=-1)
+            return torch.cat((-x2, x1), dim=-1)
+
+        # interleaved
+        x1 = x[:, :, :, ::2]
+        x2 = x[:, :, :, 1::2]
+        x_new = torch.stack((-x2, x1), dim=-1)
+        return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
 
-def _apply_rotary_pos_emb_base(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-    start_positions: torch.Tensor = None,
-    tensor_format: str = "sbhd",
-    interleaved: bool = False,
-) -> torch.Tensor:
-    """
-    Base implementation of applying rotary positional embedding tensor to the input tensor.
+    def _apply_rotary_pos_emb_base(
+        t: torch.Tensor,
+        freqs: torch.Tensor,
+        start_positions: torch.Tensor = None,
+        tensor_format: str = "sbhd",
+        interleaved: bool = False,
+    ) -> torch.Tensor:
+        """
+        Base implementation of applying rotary positional embedding tensor to the input tensor.
 
-    Parameters
-    ----------
-    t: torch.Tensor
-        Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which rotary positional
-        embedding will be applied.
-    freqs: torch.Tensor
-        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
-        with `s2 >= s` and `d2 <= d`.
-    start_positions: torch.Tensor, default = None.
-        Tokens in a sequence `i` should be applied with position encoding offset by
-        `start_positions[i]`. If `start_positions=None`, there's no offset.
-    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
-        Should be `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is of shape
-        `[seq, bs, ...]`.
-    interleaved: bool, default = False
-        Whether to use interleaved rotary position embedding.
-    """
-    max_seq_len = freqs.shape[0]
-    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
+        Parameters
+        ----------
+        t: torch.Tensor
+            Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which rotary positional
+            embedding will be applied.
+        freqs: torch.Tensor
+            Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+            with `s2 >= s` and `d2 <= d`.
+        start_positions: torch.Tensor, default = None.
+            Tokens in a sequence `i` should be applied with position encoding offset by
+            `start_positions[i]`. If `start_positions=None`, there's no offset.
+        tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+            Should be `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is of shape
+            `[seq, bs, ...]`.
+        interleaved: bool, default = False
+            Whether to use interleaved rotary position embedding.
+        """
+        max_seq_len = freqs.shape[0]
+        cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
 
-    # In case `start_positions` are provided, create a staggered `freqs` tensor
-    # offset by the values in `start_positions`.
-    # `start_positions` is only supported for `cp_size=1` and inference.
-    if start_positions is not None:
-        max_offset = torch.max(start_positions)
+        # In case `start_positions` are provided, create a staggered `freqs` tensor
+        # offset by the values in `start_positions`.
+        # `start_positions` is only supported for `cp_size=1` and inference.
+        if start_positions is not None:
+            max_offset = torch.max(start_positions)
+            assert (
+                max_offset + cur_seq_len <= max_seq_len
+            ), f"Rotary Embeddings only suppported up to {max_seq_len} sequence length!"
+
+            # Stack staggered rope embeddings along the batch dimension
+            freqs = torch.concatenate([freqs[i : i + cur_seq_len] for i in start_positions], dim=1)
+
+            # Note that from this point, `freqs` has a shape `(s,b,1,d)`.
+
+        # Only apply the rotary embeddings up to the sequence length of the running
+        # input.
         assert (
-            max_offset + cur_seq_len <= max_seq_len
-        ), f"Rotary Embeddings only suppported up to {max_seq_len} sequence length!"
+            cur_seq_len <= max_seq_len
+        ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+        freqs = freqs[:cur_seq_len]
 
-        # Stack staggered rope embeddings along the batch dimension
-        freqs = torch.concatenate([freqs[i : i + cur_seq_len] for i in start_positions], dim=1)
+        # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
+        # [seq, b, 1, dim] -> [b, seq, 1, dim]
+        if tensor_format == "bshd":
+            freqs = freqs.transpose(0, 1)
+        # cos/sin first then dtype conversion for better precision
+        cos_ = torch.cos(freqs).to(t.dtype)
+        sin_ = torch.sin(freqs).to(t.dtype)
 
-        # Note that from this point, `freqs` has a shape `(s,b,1,d)`.
+        rot_dim = freqs.shape[-1]
+        # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+        t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-    # Only apply the rotary embeddings up to the sequence length of the running
-    # input.
-    assert (
-        cur_seq_len <= max_seq_len
-    ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    freqs = freqs[:cur_seq_len]
+        # first part is cosine component
+        # second part is sine component, need to change signs with _rotate_half method
+        t = (t * cos_) + (_rotate_half(t, interleaved) * sin_)
+        return torch.cat((t, t_pass), dim=-1)
 
-    # [seq, 1, 1, dim] -> [1, seq, 1, dim] or
-    # [seq, b, 1, dim] -> [b, seq, 1, dim]
-    if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1)
-    # cos/sin first then dtype conversion for better precision
-    cos_ = torch.cos(freqs).to(t.dtype)
-    sin_ = torch.sin(freqs).to(t.dtype)
+    def apply_rotary_pos_emb(
+        t: torch.Tensor,
+        freqs: torch.Tensor,
+        tensor_format: str = "sbhd",
+        start_positions: Union[torch.Tensor, None] = None,
+        interleaved: bool = False,
+        fused: bool = False,
+        cu_seqlens: Union[torch.Tensor, None] = None,
+        cp_size: int = 1,
+    ) -> torch.Tensor:
+        """
+        Apply rotary positional embedding tensor to the input tensor.
 
-    rot_dim = freqs.shape[-1]
-    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+        Support matrix:
+        Fused/Unfused:
+            Training:
+                qkv_formats:            "thd", "bshd", "sbhd"
+                context parallel:       yes
+                start_positions:        no
+                interleaving:           yes
+            Inference:
+                qkv_formats:            "thd", "bshd", "sbhd"
+                context parallelism:    no
+                start_positions:        yes
+                interleaving:            yes
 
-    # first part is cosine component
-    # second part is sine component, need to change signs with _rotate_half method
-    t = (t * cos_) + (_rotate_half(t, interleaved) * sin_)
-    return torch.cat((t, t_pass), dim=-1)
+        Parameters
+        ----------
+        t: torch.Tensor
+            Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
+            rotary positional embedding will be applied.
+        freqs: torch.Tensor
+            Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+            with `s2 >= s` and `d2 <= d`.
+        start_positions: torch.Tensor, default = None.
+            Tokens in a sequence `i` should be applied with position encoding offset by
+            `start_positions[i]`. If `start_positions=None`, there's no offset.
+        tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
+            is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
+            of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
+        interleaved: bool, default = False
+            Whether to use interleaved rotary position embedding.
+        fused: bool, default = False
+            Whether to use a fused applying RoPE implementation.
+        cu_seqlens: torch.Tensor, default = None.
+            Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
+            dtype torch.int32. Only valid when `tensor_format` is 'thd'.
+            Should be `cu_seqlens_padded` when cp_size > 1.
+        cp_size: int, default = 1.
+            Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
+        cp_rank: int, default = 0.
+            Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
+        """
 
+        # `start_positions` is only supported for `cp_size=1` and inference.
+        assert not (
+            cp_size > 1 and start_positions is not None
+        ), """start_positions != None with CP SIZE > 1 is not supported!"""
 
-def apply_rotary_pos_emb(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-    tensor_format: str = "sbhd",
-    start_positions: Union[torch.Tensor, None] = None,
-    interleaved: bool = False,
-    fused: bool = False,
-    cu_seqlens: Union[torch.Tensor, None] = None,
-    cp_size: int = 1,
-    cp_rank: int = 0,
-) -> torch.Tensor:
-    """
-    Apply rotary positional embedding tensor to the input tensor.
+        assert (
+            tensor_format != "thd" or cu_seqlens is not None
+        ), "cu_seqlens must not be None when tensor_format is 'thd'."
 
-    Support matrix:
-    Fused/Unfused:
-        Training:
-            qkv_formats:            "thd", "bshd", "sbhd"
-            context parallel:       yes
-            start_positions:        no
-            interleaving:           yes
-        Inference:
-            qkv_formats:            "thd", "bshd", "sbhd"
-            context parallelism:    no
-            start_positions:        yes
-            interleaving:            yes
+        assert fused == False
 
-    Parameters
-    ----------
-    t: torch.Tensor
-        Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
-        rotary positional embedding will be applied.
-    freqs: torch.Tensor
-        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
-        with `s2 >= s` and `d2 <= d`.
-    start_positions: torch.Tensor, default = None.
-        Tokens in a sequence `i` should be applied with position encoding offset by
-        `start_positions[i]`. If `start_positions=None`, there's no offset.
-    tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
-        is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
-        of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
-    interleaved: bool, default = False
-        Whether to use interleaved rotary position embedding.
-    fused: bool, default = False
-        Whether to use a fused applying RoPE implementation.
-    cu_seqlens: torch.Tensor, default = None.
-        Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
-        dtype torch.int32. Only valid when `tensor_format` is 'thd'.
-        Should be `cu_seqlens_padded` when cp_size > 1.
-    cp_size: int, default = 1.
-        Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
-    cp_rank: int, default = 0.
-        Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
-    """
+        # Unfused THD format
+        if tensor_format == "thd":
+            cu_seqlens = cu_seqlens // cp_size
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
 
-    # `start_positions` is only supported for `cp_size=1` and inference.
-    assert not (
-        cp_size > 1 and start_positions is not None
-    ), """start_positions != None with CP SIZE > 1 is not supported!"""
+            # The following code essentially splits the `thd` tensor into corresponding
+            # `s1hd` tensors (for each sequence) and applies rotary embedding to
+            # those sequences individually.
+            # Note that if `start_positions` is not `None`, then for each sequence,
+            # it's corresponding rope offset is also supplied from `start_positions`
+            # individually.
+            return torch.cat(
+                [
+                    _apply_rotary_pos_emb_base(
+                        x.unsqueeze(1),
+                        freqs,
+                        start_positions=(
+                            start_positions[idx : idx + 1] if start_positions is not None else None
+                        ),
+                        interleaved=interleaved,
+                    )
+                    for idx, x in enumerate(torch.split(t, seqlens))
+                ]
+            ).squeeze(1)
 
-    assert (
-        tensor_format != "thd" or cu_seqlens is not None
-    ), "cu_seqlens must not be None when tensor_format is 'thd'."
+        # Unfused SBHD/BSHD format
+        if tensor_format == "sbhd":
+            seqlen = t.size(0)
+        elif tensor_format == "bshd":
+            seqlen = t.size(1)
+        else:
+            raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
+        return _apply_rotary_pos_emb_base(
+            t,
+            freqs,
+            start_positions,
+            tensor_format,
+            interleaved=interleaved,
+        )
 
-    assert fused == False
+    class RMSNorm(torch.nn.Module):
+        def __init__(self, dim: int, eps: float = 1e-5) -> None:
+            super().__init__()
+            self.eps = eps
+            self.weight = nn.Parameter(torch.ones(dim))
 
-    # Unfused THD format
-    if tensor_format == "thd":
-        cu_seqlens = cu_seqlens // cp_size
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        def reset_parameters(self) -> None:
+            torch.nn.init.ones_(self.weight)
 
-        # The following code essentially splits the `thd` tensor into corresponding
-        # `s1hd` tensors (for each sequence) and applies rotary embedding to
-        # those sequences individually.
-        # Note that if `start_positions` is not `None`, then for each sequence,
-        # it's corresponding rope offset is also supplied from `start_positions`
-        # individually.
-        return torch.cat(
-            [
-                _apply_rotary_pos_emb_base(
-                    x.unsqueeze(1),
-                    freqs,
-                    start_positions=(
-                        start_positions[idx : idx + 1] if start_positions is not None else None
-                    ),
-                    interleaved=interleaved,
-                )
-                for idx, x in enumerate(torch.split(t, seqlens))
-            ]
-        ).squeeze(1)
+        def _norm(self, x: torch.Tensor) -> torch.Tensor:
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-    # Unfused SBHD/BSHD format
-    if tensor_format == "sbhd":
-        seqlen = t.size(0)
-    elif tensor_format == "bshd":
-        seqlen = t.size(1)
-    else:
-        raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
-    return _apply_rotary_pos_emb_base(
-        t,
-        freqs,
-        start_positions,
-        tensor_format,
-        interleaved=interleaved,
-    )
-
-
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def reset_parameters(self) -> None:
-        torch.nn.init.ones_(self.weight)
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            output = self._norm(x.float()).type_as(x)
+            return output * self.weight
 
 
 # ---------------------- Feed Forward Network -----------------------
@@ -347,12 +351,14 @@ class Attention(nn.Module):
         head_dim: int = 64,
         dropout: float = 0.0,
         qkv_format: str = "bshd",
-        backend: str = "torch",
+        backend: str = "transformer_engine",
     ) -> None:
         super().__init__()
         self.is_selfattn = context_dim is None  # self attention
 
-        assert backend in ["transformer_engine", "torch", "minimal_a2a"], f"Invalid backend: {backend}"
+        if backend not in ["transformer_engine", "torch"]:
+            raise NotImplementedError(f"Unrecognized {backend=}.")
+
         self.backend = backend
 
         context_dim = query_dim if context_dim is None else context_dim
@@ -376,7 +382,16 @@ class Attention(nn.Module):
         self.output_proj = nn.Linear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
 
-        if self.backend == "torch":
+        if self.backend == "transformer_engine":
+            self.attn_op = DotProductAttention(
+                self.n_heads,
+                self.head_dim,
+                num_gqa_groups=self.n_heads,
+                attention_dropout=0,
+                qkv_format=qkv_format,
+                attn_mask_type="no_mask",
+            )
+        elif self.backend == "torch":
             self.attn_op = torch_attention_op
         else:
             raise NotImplementedError()
@@ -422,8 +437,8 @@ class Attention(nn.Module):
             k = self.k_norm(k)
             v = self.v_norm(v)
             if self.is_selfattn and rope_emb is not None:  # only apply to self-attention!
-                q = apply_rotary_pos_emb(q, rope_emb, tensor_format=self.qkv_format, fused=False)
-                k = apply_rotary_pos_emb(k, rope_emb, tensor_format=self.qkv_format, fused=False)
+                q = apply_rotary_pos_emb(q, rope_emb, tensor_format=self.qkv_format, fused=(self.backend=='transformer_engine'))
+                k = apply_rotary_pos_emb(k, rope_emb, tensor_format=self.qkv_format, fused=(self.backend=='transformer_engine'))
             return q, k, v
 
         q, k, v = apply_norm_and_rotary_pos_emb(q, k, v, rope_emb)
@@ -444,6 +459,7 @@ class Attention(nn.Module):
         Args:
             x (Tensor): The query tensor of shape [B, Mq, K]
             context (Optional[Tensor]): The key tensor of shape [B, Mk, K] or use x as context [self attention] if None
+            rope_emb (Optional[Tensor]): RoPE embedding tensor, or no RoPE embeddings (i.e. in cross attention)
         """
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
         return self.compute_attention(q, k, v)
@@ -952,16 +968,24 @@ class Block(nn.Module):
         mlp_ratio: float = 4.0,
         use_adaln_lora: bool = False,
         adaln_lora_dim: int = 256,
-        backend: str = "transformer_engine",
+        self_attention_backend: str = "transformer_engine",
+        cross_attention_backend: str = "transformer_engine",
     ):
         super().__init__()
         self.x_dim = x_dim
         self.layer_norm_self_attn = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
-        self.self_attn = Attention(x_dim, None, num_heads, x_dim // num_heads, qkv_format="bshd", backend=backend)
+        self.self_attn = Attention(
+            x_dim,
+            None,
+            num_heads,
+            x_dim // num_heads,
+            qkv_format="bshd",
+            backend=self_attention_backend,
+        )
 
         self.layer_norm_cross_attn = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
         self.cross_attn = Attention(
-            x_dim, context_dim, num_heads, x_dim // num_heads, qkv_format="bshd", backend=backend
+            x_dim, context_dim, num_heads, x_dim // num_heads, qkv_format="bshd", backend=cross_attention_backend
         )
 
         self.layer_norm_mlp = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
@@ -1173,7 +1197,6 @@ class MiniTrainDIT(nn.Module):
         num_blocks: int = 10,
         num_heads: int = 16,
         mlp_ratio: float = 4.0,
-        atten_backend: str = "torch",
         # cross attention settings
         crossattn_emb_channels: int = 1024,
         # positional embedding settings
@@ -1193,6 +1216,8 @@ class MiniTrainDIT(nn.Module):
         extra_t_extrapolation_ratio: float = 1.0,
         rope_enable_fps_modulation: bool = True,
     ) -> None:
+        atten_backend = 'transformer_engine' if te is not None else 'torch'
+
         super().__init__()
         self.max_img_h = max_img_h
         self.max_img_w = max_img_w
@@ -1240,7 +1265,8 @@ class MiniTrainDIT(nn.Module):
                     mlp_ratio=mlp_ratio,
                     use_adaln_lora=use_adaln_lora,
                     adaln_lora_dim=adaln_lora_dim,
-                    backend=atten_backend,
+                    self_attention_backend=atten_backend,
+                    cross_attention_backend=atten_backend,
                 )
                 for _ in range(num_blocks)
             ]
@@ -1257,7 +1283,6 @@ class MiniTrainDIT(nn.Module):
 
         self.t_embedding_norm = RMSNorm(model_channels, eps=1e-6)
         self.init_weights()
-        self._is_context_parallel_enabled = False
 
     def init_weights(self) -> None:
         self.x_embedder.init_weights()
