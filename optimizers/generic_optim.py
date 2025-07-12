@@ -1,6 +1,7 @@
 # Implementation taken from https://github.com/timmytonga/sn-sm
 # Modified to automatically do Kahan summation for bfloat16 parameters.
 # Made resuming from checkpoint work, but ONLY for the svd case.
+# Muon method taken from: https://github.com/KellerJordan/Muon
 
 from typing import Callable, Iterable, Tuple
 import math
@@ -12,6 +13,9 @@ import torch
 from torch.optim import Optimizer
 
 from transformers.utils.versions import require_version
+
+
+NS_STEPS = 5
 
 
 def has_inf_or_nan(x):
@@ -143,6 +147,35 @@ def closest_smaller_divisor_of_n_to_k(n: int, k: int) -> int:
             return int(i)
 
 
+def zeropower_via_newtonschulz5(G, steps: int):
+    """
+    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
+    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
+    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
+    zero even beyond the point where the iteration no longer converges all the way to one everywhere
+    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
+    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
+    performance at all relative to UV^T, where USV^T = G is the SVD.
+    """
+    assert G.ndim >= 2 # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16()
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
+    # Ensure spectral norm is at most 1
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    # Perform the NS iterations
+    for _ in range(steps):
+        A = X @ X.mT
+        B = b * A + c * A @ A # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+        X = a * X + B @ X
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+    return X
+
+
 class GenericOptim(Optimizer):
     """
     Parameters:
@@ -204,6 +237,7 @@ class GenericOptim(Optimizer):
             second_moment_type: str = "ema",
             correct_dim=False,
             cpu_kahan=False,
+            muon=False,
     ):
         self.momentum_type = momentum_type
         assert self.momentum_type in ["ema", "sm", "none"]
@@ -219,13 +253,14 @@ class GenericOptim(Optimizer):
             raise ValueError(f"Invalid beta parameter: {betas[1]} - should be in [0.0, 1.0]")
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
-        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim, 'cpu_kahan': cpu_kahan}
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim,
+                    'cpu_kahan': cpu_kahan, 'muon': muon}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
               f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
-              f"cpu_kahan={cpu_kahan}")
+              f"cpu_kahan={cpu_kahan}, muon={muon}")
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -258,20 +293,27 @@ class GenericOptim(Optimizer):
                 if "step" not in state:
                     state["step"] = 0
                 state["step"] += 1
+                step_size = group["lr"]
 
                 # get momentum
                 numerator = self.get_numerator(group, state, p)
 
-                # get adaptive step size
-                denominator = self.get_denominator(group, state, p)
-
-                # Bias correction and step size
-                step_size = group["lr"]
-                beta1, beta2 = group["betas"]
-                if group["correct_bias"]:  # No bias correction for Bert
-                    bias_correction1 = 1.0 - beta1 ** state["step"]
-                    bias_correction2 = 1.0 - beta2 ** state["step"]
-                    step_size = step_size * math.sqrt(bias_correction2) / bias_correction1
+                if group['muon'] and numerator.ndim > 1:
+                    rows, cols = numerator.shape[-2:]
+                    if numerator.ndim == 4: # for the case of conv filters
+                        numerator = numerator.view(len(numerator), -1)
+                    numerator = zeropower_via_newtonschulz5(numerator, steps=NS_STEPS)
+                    numerator.mul_(max(1, rows / cols)**0.5)
+                    denominator = None
+                else:
+                    # get adaptive step size
+                    denominator = self.get_denominator(group, state, p)
+                    # Bias correction
+                    beta1, beta2 = group["betas"]
+                    if group["correct_bias"]:  # No bias correction for Bert
+                        bias_correction1 = 1.0 - beta1 ** state["step"]
+                        bias_correction2 = 1.0 - beta2 ** state["step"]
+                        step_size = step_size * math.sqrt(bias_correction2) / bias_correction1
 
                 update = torch.zeros_like(p)
 
