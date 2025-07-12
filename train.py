@@ -526,6 +526,9 @@ if __name__ == '__main__':
     )
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
+    if config.get('compile', False):
+        pipeline_model.compile()
+
     def get_optimizer(model_parameters):
         if len(model_parameters) == 0:
             return DummyOptimizer()
