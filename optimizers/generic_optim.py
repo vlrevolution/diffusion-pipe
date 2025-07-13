@@ -176,6 +176,9 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
+zeropower_via_newtonschulz5_compile = None
+
+
 class GenericOptim(Optimizer):
     """
     Parameters:
@@ -238,6 +241,7 @@ class GenericOptim(Optimizer):
             correct_dim=False,
             cpu_offload=False,
             muon=False,
+            compile=False,
     ):
         self.momentum_type = momentum_type
         assert self.momentum_type in ["ema", "sm", "none"]
@@ -254,13 +258,13 @@ class GenericOptim(Optimizer):
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim,
-                    'cpu_offload': cpu_offload, 'muon': muon}
+                    'cpu_offload': cpu_offload, 'muon': muon, 'compile': compile}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
               f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
-              f"cpu_offload={cpu_offload}, muon={muon}")
+              f"cpu_offload={cpu_offload}, muon={muon}, compile={compile}")
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -304,7 +308,14 @@ class GenericOptim(Optimizer):
                     rows, cols = numerator.shape[-2:]
                     if numerator.ndim == 4: # for the case of conv filters
                         numerator = numerator.view(len(numerator), -1)
-                    numerator = zeropower_via_newtonschulz5(numerator, steps=NS_STEPS)
+                    if group['compile']:
+                        global zeropower_via_newtonschulz5_compile
+                        if zeropower_via_newtonschulz5_compile is None:
+                            zeropower_via_newtonschulz5_compile = torch.compile(zeropower_via_newtonschulz5)
+                        orthogonalize = zeropower_via_newtonschulz5_compile
+                    else:
+                        orthogonalize = zeropower_via_newtonschulz5
+                    numerator = orthogonalize(numerator, steps=NS_STEPS)
                     step_size *= math.sqrt(max(rows, cols))
                     denominator = None
                 else:

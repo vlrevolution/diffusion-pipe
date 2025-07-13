@@ -126,6 +126,7 @@ def set_config_defaults(config):
     config.setdefault('eval_every_n_steps', None)
     config.setdefault('eval_every_n_epochs', None)
     config.setdefault('eval_before_first_step', True)
+    config.setdefault('compile', False)
 
 
 def get_most_recent_run_dir(output_dir):
@@ -526,7 +527,7 @@ if __name__ == '__main__':
     )
     parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
 
-    if config.get('compile', False):
+    if config['compile']:
         pipeline_model.compile()
 
     def get_optimizer(model_parameters):
@@ -633,6 +634,7 @@ if __name__ == '__main__':
             from optimizers import gradient_release
             return gradient_release.GradientReleaseOptimizerWrapper(list(optimizer_dict.values()))
         elif optim_type_lower == 'genericoptim':
+            kwargs['compile'] = config['compile']
             new_param_groups = []
             param_groups = model.get_param_groups(model_parameters)
             for pg in param_groups:
