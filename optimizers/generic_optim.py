@@ -303,7 +303,7 @@ class GenericOptim(Optimizer):
                     if numerator.ndim == 4: # for the case of conv filters
                         numerator = numerator.view(len(numerator), -1)
                     numerator = zeropower_via_newtonschulz5(numerator, steps=NS_STEPS)
-                    numerator.mul_(max(1, rows / cols)**0.5)
+                    step_size *= math.sqrt(max(rows, cols))
                     denominator = None
                 else:
                     # get adaptive step size

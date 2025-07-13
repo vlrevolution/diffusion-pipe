@@ -646,7 +646,8 @@ if __name__ == '__main__':
                         params_other.append(p)
                 pg_2d = pg.copy()
                 pg_2d['params'] = params_2d
-                pg_2d['subset_size'] = 'heuristics'
+                if kwargs.get('second_moment_type', None) == 'sn':
+                    pg_2d['subset_size'] = 'heuristics'
                 for key in ('rank', 'proj_type', 'update_proj_gap'):
                     if key in kwargs:
                         pg_2d[key] = kwargs.pop(key)
