@@ -236,7 +236,7 @@ class GenericOptim(Optimizer):
             momentum_type: str = "ema",
             second_moment_type: str = "ema",
             correct_dim=False,
-            cpu_kahan=False,
+            cpu_offload=False,
             muon=False,
     ):
         self.momentum_type = momentum_type
@@ -254,13 +254,13 @@ class GenericOptim(Optimizer):
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim,
-                    'cpu_kahan': cpu_kahan, 'muon': muon}
+                    'cpu_offload': cpu_offload, 'muon': muon}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
               f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
-              f"cpu_kahan={cpu_kahan}, muon={muon}")
+              f"cpu_offload={cpu_offload}, muon={muon}")
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -294,9 +294,11 @@ class GenericOptim(Optimizer):
                     state["step"] = 0
                 state["step"] += 1
                 step_size = group["lr"]
+                cpu_offload = group['cpu_offload'] if p.ndim >= 2 else False
+                state_device = 'cpu' if cpu_offload else p.device
 
                 # get momentum
-                numerator = self.get_numerator(group, state, p)
+                numerator = self.get_numerator(group, state, p, state_device)
 
                 if group['muon'] and numerator.ndim > 1:
                     rows, cols = numerator.shape[-2:]
@@ -307,7 +309,7 @@ class GenericOptim(Optimizer):
                     denominator = None
                 else:
                     # get adaptive step size
-                    denominator = self.get_denominator(group, state, p)
+                    denominator = self.get_denominator(group, state, p, state_device)
                     # Bias correction
                     beta1, beta2 = group["betas"]
                     if group["correct_bias"]:  # No bias correction for Bert
@@ -336,14 +338,12 @@ class GenericOptim(Optimizer):
                 if group["weight_decay"] > 0.0:
                     update.add_(p, alpha=(-group["lr"] * group["weight_decay"]))
 
-                cpu_kahan = group['cpu_kahan']
-                synchronize |= cpu_kahan
+                synchronize |= cpu_offload
 
                 if p.dtype == torch.bfloat16:
                     # Kahan summation for bfloat16
-                    shift_device = 'cpu' if cpu_kahan else p.device
                     if 'shift' not in state:
-                        state['shift'] = torch.zeros_like(p, device=shift_device)
+                        state['shift'] = torch.zeros_like(p)
                     shift = state['shift'].to(p.device, non_blocking=True)
                     shift.add_(update)
                     # Use grad as temp buffer
@@ -351,7 +351,7 @@ class GenericOptim(Optimizer):
                     p.add_(shift)
                     shift.add_(p.grad.sub_(p))
                     # TODO: non_blocking=True here causes CUDA error on first step after checkpoint save.
-                    state['shift'] = shift.to(shift_device)
+                    state['shift'] = shift.to(state_device)
                 else:
                     p.add_(update)
 
@@ -364,7 +364,7 @@ class GenericOptim(Optimizer):
 
         return loss
 
-    def get_numerator(self, group, state, p):
+    def get_numerator(self, group, state, p, state_device):
         grad = p.grad
         beta1, beta2 = group["betas"]
         if beta1 == 0 or self.momentum_type == "none":
@@ -376,13 +376,14 @@ class GenericOptim(Optimizer):
             if "exp_avg" not in state:
                 state["exp_avg"] = torch.zeros_like(grad)
             # Momentum term
-            exp_avg = state["exp_avg"]
+            exp_avg = state["exp_avg"].to(p.device, non_blocking=True)
             exp_avg.mul_(beta1).add_(grad, alpha=(1.0 - beta1))
+            state['exp_avg'] = exp_avg.to(state_device)
             return exp_avg
         else:
             raise ValueError(f"Unrecognized momentum_type = {self.momentum_type}.")
 
-    def get_denominator(self, group, state, p):
+    def get_denominator(self, group, state, p, state_device):
         grad = p.grad
         beta1, beta2 = group["betas"]
         if beta2 == 0 or self.second_moment_type == "none":
@@ -390,11 +391,12 @@ class GenericOptim(Optimizer):
         elif self.second_moment_type == "ema":  # Adam style
             if "exp_avg_sq" not in state:  # initialization
                 state["exp_avg_sq"] = torch.zeros_like(grad)
-            exp_avg_sq = state["exp_avg_sq"]
+            exp_avg_sq = state["exp_avg_sq"].to(p.device, non_blocking=True)
             if beta2 < 1:  # EMA
                 exp_avg_sq.mul_(beta2).add_(grad**2, alpha=1.0 - beta2)
             else:  # == 1 means AdaGrad
                 exp_avg_sq.add_(grad**2)
+            state['exp_avg_sq'] = exp_avg_sq.to(state_device)
             return exp_avg_sq.sqrt().add_(group["eps"])
         elif self.second_moment_type == "sn":
             return get_and_update_subset_norm_denom(group, state, grad, beta2)
