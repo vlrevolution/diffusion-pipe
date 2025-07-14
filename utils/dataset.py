@@ -361,7 +361,7 @@ class DirectoryDataset:
 
         # Check if all the grouped metadata datasets exist. If so, we can directly load them.
         all_grouped_metadata_exists, unique_grouping_keys = check_grouped_metadata()
-        if not all_grouped_metadata_exists:
+        if regenerate_cache or not all_grouped_metadata_exists:
             # Otherwise, need to compute the ungrouped metadata and then group.
             print('Grouped metadata is not cached. Computing ungrouped metadata and then grouping.')
             unique_grouping_keys = self._group_metadata_and_save_to_disk(regenerate_cache=regenerate_cache)
@@ -409,9 +409,6 @@ class DirectoryDataset:
                 d[k].append(v)
         unique_grouping_keys = list(unique_grouping_keys)
 
-        with open(self.grouping_keys_json_file, 'w') as f:
-            json.dump(unique_grouping_keys, f)
-
         if self.use_size_buckets:
             for size_bucket, metadata in grouped_metadata.items():
                 metadata = datasets.Dataset.from_dict(metadata)
@@ -422,6 +419,10 @@ class DirectoryDataset:
                 metadata = datasets.Dataset.from_dict(metadata)
                 grouped_cache_dir = self.cache_dir / f'metadata/grouped_metadata_{bucket_suffix(ar_bucket)}'
                 metadata.save_to_disk(grouped_cache_dir)
+
+        with open(self.grouping_keys_json_file, 'w') as f:
+            json.dump(unique_grouping_keys, f)
+
         return unique_grouping_keys
 
     def _get_ungrouped_metadata(self, regenerate_cache=False):
