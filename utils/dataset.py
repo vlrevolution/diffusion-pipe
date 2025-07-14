@@ -38,7 +38,8 @@ def shuffle_with_seed(l, seed=None):
 
 
 def shuffle_captions(captions: list[str], count: int = 0, delimiter: str = ', ', caption_prefix: str = '') -> list[str]:
-    if count == 0: return captions
+    if count == 0:
+        return [caption_prefix + c for c in captions]
 
     def shuffle_caption(caption: str, delimiter: str = ", ") -> str:
         split = caption.split(delimiter)
