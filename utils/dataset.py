@@ -300,6 +300,7 @@ class DirectoryDataset:
         self.shuffle_delimiter = directory_config.get('cache_shuffle_delimiter', dataset_config.get('cache_shuffle_delimiter', ", "))
         self.path = Path(self.directory_config['path'])
         self.mask_path = Path(self.directory_config['mask_path']) if 'mask_path' in self.directory_config else None
+        self.control_path = Path(self.directory_config['control_path']) if 'control_path' in self.directory_config else None
         # For testing. Default if a mask is missing.
         self.default_mask_file = Path(self.directory_config['default_mask_file']) if 'default_mask_file' in self.directory_config else None
         self.cache_dir = self.path / 'cache' / self.model_name
@@ -309,6 +310,8 @@ class DirectoryDataset:
             raise RuntimeError(f'Invalid path: {self.path}')
         if self.mask_path is not None and (not self.mask_path.exists() or not self.mask_path.is_dir()):
             raise RuntimeError(f'Invalid mask_path: {self.mask_path}')
+        if self.control_path is not None and (not self.control_path.exists() or not self.control_path.is_dir()):
+            raise RuntimeError(f'Invalid control_path: {self.control_path}')
         if self.default_mask_file is not None and (not self.default_mask_file.exists() or not self.default_mask_file.is_file()):
             raise RuntimeError(f'Invalid default_mask_file: {self.default_mask_file}')
 
@@ -438,6 +441,7 @@ class DirectoryDataset:
 
             # Mask can have any extension, it just needs to have the same stem as the image.
             mask_file_stems = {path.stem: path for path in self.mask_path.glob('*') if path.is_file()} if self.mask_path is not None else {}
+            control_file_stems = {path.stem: path for path in self.control_path.glob('*') if path.is_file()} if self.control_path is not None else {}
 
             def process_file(file):
                 if file.suffix != '.tar':
@@ -451,6 +455,7 @@ class DirectoryDataset:
             image_specs = []
             caption_files = []
             mask_files = []
+            control_files = []
             for file in tqdm(files):
                 if not file.is_file() or file.suffix == '.txt' or file.suffix == '.npz' or file.suffix == '.json' or file.suffix == '.parquet':
                     continue
@@ -461,6 +466,7 @@ class DirectoryDataset:
                         caption_file = ''
                     image_specs.append(image_spec)
                     caption_files.append(str(caption_file))
+                    # mask
                     if image_file.stem in mask_file_stems:
                         mask_files.append(str(mask_file_stems[image_file.stem]))
                     elif self.default_mask_file is not None:
@@ -469,9 +475,17 @@ class DirectoryDataset:
                         if self.mask_path is not None:
                             logger.warning(f'No mask file was found for image {image_file}, not using mask.')
                         mask_files.append(None)
+                    # control (e.g. Flux Kontext)
+                    if self.control_path:
+                        if image_file.stem not in control_file_stems:
+                            raise RuntimeError(f'No control file exists for image {image_file}')
+                        control_files.append(str(control_file_stems[image_file.stem]))
             assert len(image_specs) > 0, f'Directory {self.path} had no images/videos!'
 
-            metadata_dataset = datasets.Dataset.from_dict({'image_spec': image_specs, 'caption_file': caption_files, 'mask_file': mask_files})
+            d = {'image_spec': image_specs, 'caption_file': caption_files, 'mask_file': mask_files}
+            if self.control_path:
+                d['control_file'] = control_files
+            metadata_dataset = datasets.Dataset.from_dict(d)
 
             if captions_json.exists():
                 print('Loading captions JSON')
@@ -543,6 +557,8 @@ class DirectoryDataset:
                 self.shuffle = 1
             captions = shuffle_captions(captions, self.shuffle, self.shuffle_delimiter, self.directory_config['caption_prefix'])
             empty_return = {'image_spec': [], 'mask_file': [], 'caption': [], 'ar_bucket': [], 'size_bucket': [], 'is_video': []}
+            if self.control_path:
+                empty_return['control_file'] = []
 
             if image_spec[0] is None:
                 tar_f = None
@@ -598,14 +614,17 @@ class DirectoryDataset:
                     return empty_return
                 size_bucket = None
 
-            return {
+            ret = {
                 'image_spec': [image_spec],
                 'mask_file': [example['mask_file'][0]],
                 'caption': [captions],
                 'ar_bucket': [ar_bucket],
                 'size_bucket': [size_bucket],
-                'is_video': [is_video]
+                'is_video': [is_video],
             }
+            if self.control_path:
+                ret['control_file'] = [example['control_file'][0]]
+            return ret
 
         return fn
 
@@ -838,26 +857,40 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
     pipes = {}
 
     def latents_map_fn(example, rank):
+        is_edit_dataset = ('control_file' in example)
         first_size_bucket = example['size_bucket'][0]
         tensors_and_masks = []
         image_specs = []
         captions = []
-        for image_spec, mask_path, size_bucket, caption in zip(example['image_spec'], example['mask_file'], example['size_bucket'], example['caption']):
+        control_tensors_and_masks = []
+        for i, (image_spec, mask_path, size_bucket, caption) in enumerate(
+            zip(example['image_spec'], example['mask_file'], example['size_bucket'], example['caption'])
+        ):
             assert size_bucket == first_size_bucket
             items = preprocess_media_file_fn(image_spec, mask_path, size_bucket)
             tensors_and_masks.extend(items)
             image_specs.extend([image_spec] * len(items))
             captions.extend([caption] * len(items))
+            if is_edit_dataset:
+                control_file = example['control_file'][i]
+                control_items = preprocess_media_file_fn((None, control_file), None, size_bucket)
+                assert len(control_items) == 1
+                assert len(items) == 1
+                control_tensors_and_masks.append(control_items[0])
+            else:
+                control_tensors_and_masks.append(None)
 
         if len(tensors_and_masks) == 0:
+            assert not is_edit_dataset
             return {'latents': [], 'mask': [], 'image_spec': [], 'caption': []}
 
         caching_batch_size = len(example['image_spec'])
         results = defaultdict(list)
         for i in range(0, len(tensors_and_masks), caching_batch_size):
-            tensors = [t[0] for t in tensors_and_masks[i:i+caching_batch_size]]
+            tensor = torch.stack([t[0] for t in tensors_and_masks[i:i+caching_batch_size]])
+            c_tensor = torch.stack([t[0] for t in control_tensors_and_masks[i:i+caching_batch_size]]) if is_edit_dataset else None
             parent_conn, child_conn = pipes.setdefault(rank, mp.Pipe(duplex=False))
-            queue.put((0, torch.stack(tensors), child_conn))
+            queue.put((0, tensor, c_tensor, child_conn))
             result = parent_conn.recv()  # dict
             for k, v in result.items():
                 results[k].append(v)
@@ -972,8 +1005,12 @@ class DatasetManager:
                     submodel.to('cpu')
             self.submodels[id].to('cuda')
         if id == 0:
-            tensor, pipe = task[1:]
-            results = self.call_vae_fn(tensor)
+            tensor, control_tensor, pipe = task[1:]
+            if control_tensor is not None:
+                # edit dataset
+                results = self.call_vae_fn(tensor, control_tensor)
+            else:
+                results = self.call_vae_fn(tensor)
         elif id > 0:
             caption, is_video, pipe = task[1:]
             results = self.call_text_encoder_fns[id-1](caption, is_video=is_video)
