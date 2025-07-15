@@ -13,6 +13,8 @@
 |HiDream         |✅    |❌              |✅                |
 |SD3             |✅    |❌              |✅                |
 |Cosmos-Predict2 |✅    |✅              |✅                |
+|OmniGen2        |✅    |❌              |❌                |
+|Flux Kontext    |✅    |✅              |✅                |
 
 
 ## SDXL
@@ -272,3 +274,21 @@ dtype = 'bfloat16'
 OmniGen2 LoRA training is supported. Set ```diffusers_path``` to the original model checkpoint directory. Only t2i training (i.e. single image and caption) is supported.
 
 OmniGen2 LoRAs are saved in ComfyUI format.
+
+## Flux Kontext
+```
+[model]
+type = 'flux'
+# Or just point to Flux Kontext Diffusers folder without needing transformer_path
+diffusers_path = '/data2/imagegen_models/FLUX.1-dev'
+transformer_path = '/data2/imagegen_models/flux-dev-single-files/flux1-kontext-dev.safetensors'
+dtype = 'bfloat16'
+transformer_dtype = 'float8'
+#flux_shift = true
+```
+
+Flux Kontext is supported, both for standard t2i datasets and edit datasets. The weight shapes are 100% compatible with Flux Dev, so if you already have the Dev Diffusers folder you can use transformer_path to point to the Kontext single model file to save space.
+
+See the [Flux Kontext example dataset config](../examples/flux_kontext_dataset.toml) for how to configure the dataset.
+
+Flux Kontext LoRAs are saved in Diffusers format, which will work in ComfyUI.

@@ -79,6 +79,9 @@ caching_batch_size = 1
 # especially for video data.
 #map_num_proc = 32
 
+# Use torch.compile on the model. Can speed up training throughput by a decent amount. Not tested on all models.
+#compile = true
+
 # How often deepspeed logs to console.
 steps_per_print = 1
 # How to extract video clips for training from a single input video file.
