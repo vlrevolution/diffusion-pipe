@@ -291,4 +291,6 @@ Flux Kontext is supported, both for standard t2i datasets and edit datasets. The
 
 See the [Flux Kontext example dataset config](../examples/flux_kontext_dataset.toml) for how to configure the dataset.
 
+**IMPORTANT**: The control/context images should be approximately the same aspect ratio as the target images. All of the aspect ratio and size bucketing is done with respect to the target images. Then, the control image is resized and cropped to match the target image size. If the aspect ratio of the control image is very different from the target image, it will be cropping away a lot of the control image.
+
 Flux Kontext LoRAs are saved in Diffusers format, which will work in ComfyUI.
