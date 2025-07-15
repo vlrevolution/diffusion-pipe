@@ -44,9 +44,10 @@ parser.add_argument('--local_rank', type=int, default=-1,
                     help='local rank passed from distributed launcher')
 parser.add_argument('--resume_from_checkpoint', nargs='?', const=True, default=None,
                     help='resume training from checkpoint. If no value is provided, resume from the most recent checkpoint. If a folder name is provided, resume from that specific folder.')
-parser.add_argument('--regenerate_cache', action='store_true', default=None, help='Force regenerate cache. Useful if none of the files have changed but their contents have, e.g. modified captions.')
-parser.add_argument('--cache_only', action='store_true', default=None, help='Cache model inputs then exit.')
-parser.add_argument('--i_know_what_i_am_doing', action='store_true', default=None, help="Skip certain checks and overrides. You may end up using settings that won't work.")
+parser.add_argument('--regenerate_cache', action='store_true', help='Force regenerate cache.')
+parser.add_argument('--cache_only', action='store_true', help='Cache model inputs then exit.')
+parser.add_argument('--trust_cache', action='store_true', help='Load from metadata cache files if they exist, without checking if any fingerprints have changed. Can make loading much faster for large datasets.')
+parser.add_argument('--i_know_what_i_am_doing', action='store_true', help="Skip certain checks and overrides. You may end up using settings that won't work.")
 parser.add_argument('--master_port', type=int, default=29500, help='Master port for distributed training')
 parser.add_argument('--dump_dataset', type=Path, default=None, help='Decode cached latents and dump the dataset to this directory.')
 parser = deepspeed.add_config_arguments(parser)
@@ -351,7 +352,7 @@ if __name__ == '__main__':
         'steps_per_print': config.get('steps_per_print', 1),
     }
     caching_batch_size = config.get('caching_batch_size', 1)
-    dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
+    dataset_manager = dataset_util.DatasetManager(model, regenerate_cache=regenerate_cache, trust_cache=args.trust_cache, caching_batch_size=caching_batch_size)
 
     train_data = dataset_util.Dataset(dataset_config, model, skip_dataset_validation=args.i_know_what_i_am_doing)
     dataset_manager.register(train_data)

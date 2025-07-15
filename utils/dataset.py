@@ -343,7 +343,7 @@ class DirectoryDataset:
                       ' run the script with the --i_know_what_i_am_doing flag.')
             quit()
 
-    def cache_metadata(self, regenerate_cache=False):
+    def cache_metadata(self, regenerate_cache=False, trust_cache=False):
         def check_grouped_metadata():
             all_grouped_metadata_exists = False
             unique_grouping_keys = None
@@ -364,10 +364,10 @@ class DirectoryDataset:
 
         # Check if all the grouped metadata datasets exist. If so, we can directly load them.
         all_grouped_metadata_exists, unique_grouping_keys = check_grouped_metadata()
-        if regenerate_cache or not all_grouped_metadata_exists:
+        if regenerate_cache or not all_grouped_metadata_exists or not trust_cache:
             # Otherwise, need to compute the ungrouped metadata and then group.
             print('Grouped metadata is not cached. Computing ungrouped metadata and then grouping.')
-            unique_grouping_keys = self._group_metadata_and_save_to_disk(regenerate_cache=regenerate_cache)
+            unique_grouping_keys = self._group_metadata_and_save_to_disk(regenerate_cache=regenerate_cache, trust_cache=trust_cache)
         else:
             print('Found grouped metadata cache. Directly loading it.')
 
@@ -396,8 +396,8 @@ class DirectoryDataset:
                     )
                 )
 
-    def _group_metadata_and_save_to_disk(self, regenerate_cache=False):
-        metadata_dataset = self._get_ungrouped_metadata(regenerate_cache=regenerate_cache)
+    def _group_metadata_and_save_to_disk(self, regenerate_cache=False, trust_cache=False):
+        metadata_dataset = self._get_ungrouped_metadata(regenerate_cache=regenerate_cache, trust_cache=trust_cache)
         grouped_metadata = defaultdict(lambda: defaultdict(list))
         unique_grouping_keys = set()
         for example in tqdm(metadata_dataset, desc='Grouping examples'):
@@ -428,12 +428,12 @@ class DirectoryDataset:
 
         return unique_grouping_keys
 
-    def _get_ungrouped_metadata(self, regenerate_cache=False):
+    def _get_ungrouped_metadata(self, regenerate_cache=False, trust_cache=False):
         # This method caches some intermediate datasets so we don't have to enumerate all the files each time.
         metadata_cache_file_1 = self.cache_dir / f'metadata/metadata_intermediate'
         metadata_cache_file_2 = self.cache_dir / f'metadata/metadata.arrow'
 
-        if regenerate_cache or not metadata_cache_file_1.exists():
+        if regenerate_cache or not metadata_cache_file_1.exists() or not trust_cache:
             print('Intermediate metadata is not cached. Enumerating all files.')
             files = list(self.path.glob('*'))
             # deterministic order
@@ -521,7 +521,7 @@ class DirectoryDataset:
         metadata_dataset = metadata_dataset.map(
             metadata_map_fn,
             cache_file_name=str(metadata_cache_file_2),
-            load_from_cache_file=(not regenerate_cache),
+            load_from_cache_file=(not regenerate_cache and trust_cache),
             batched=True,
             batch_size=1,
             num_proc=NUM_PROC,
@@ -828,9 +828,9 @@ class Dataset:
             ret['mask'] = None
         return ret
 
-    def cache_metadata(self, regenerate_cache=False):
+    def cache_metadata(self, regenerate_cache=False, trust_cache=False):
         for ds in self.directory_datasets:
-            ds.cache_metadata(regenerate_cache=regenerate_cache)
+            ds.cache_metadata(regenerate_cache=regenerate_cache, trust_cache=trust_cache)
 
     def cache_latents(self, map_fn, regenerate_cache=False, caching_batch_size=1):
         for ds in self.directory_datasets:
@@ -841,7 +841,7 @@ class Dataset:
             ds.cache_text_embeddings(map_fn, i, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
 
 
-def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, regenerate_cache, caching_batch_size):
+def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, regenerate_cache, trust_cache, caching_batch_size):
     # Dataset map() starts a bunch of processes. Make sure torch uses a limited number of threads
     # to avoid CPU contention.
     # TODO: if we ever change Datasets map to use spawn instead of fork, this might not work.
@@ -852,7 +852,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
     torch.set_num_threads(1)
 
     for ds in datasets:
-        ds.cache_metadata(regenerate_cache=regenerate_cache)
+        ds.cache_metadata(regenerate_cache=regenerate_cache, trust_cache=trust_cache)
 
     pipes = {}
 
@@ -922,7 +922,7 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
 # Helper class to make caching multiple datasets more efficient by moving
 # models to GPU as few times as needed.
 class DatasetManager:
-    def __init__(self, model, regenerate_cache=False, caching_batch_size=1):
+    def __init__(self, model, regenerate_cache=False, trust_cache=False, caching_batch_size=1):
         self.model = model
         self.vae = self.model.get_vae()
         self.text_encoders = self.model.get_text_encoders()
@@ -930,6 +930,7 @@ class DatasetManager:
         self.call_vae_fn = self.model.get_call_vae_fn(self.vae)
         self.call_text_encoder_fns = [self.model.get_call_text_encoder_fn(text_encoder) for text_encoder in self.text_encoders]
         self.regenerate_cache = regenerate_cache
+        self.trust_cache = trust_cache
         self.caching_batch_size = caching_batch_size
         self.datasets = []
 
@@ -959,6 +960,7 @@ class DatasetManager:
                     self.model.get_preprocess_media_file_fn(),
                     len(self.text_encoders),
                     self.regenerate_cache,
+                    self.trust_cache,
                     self.caching_batch_size,
                 )
             )
@@ -990,7 +992,7 @@ class DatasetManager:
 
         # Now load all datasets from cache.
         for ds in self.datasets:
-            ds.cache_metadata()
+            ds.cache_metadata(trust_cache=True)
             ds.cache_latents(None)
             for i in range(1, len(self.text_encoders)+1):
                 ds.cache_text_embeddings(None, i)
