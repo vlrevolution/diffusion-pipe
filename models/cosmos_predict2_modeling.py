@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Code has been modified slightly from the original, to simplify some things and
-# make it self contained in a single file without TransformerEngine dependency.
-
 import math
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -26,6 +23,15 @@ from einops.layers.torch import Rearrange
 from torch import nn
 from torch.distributed import get_process_group_ranks
 from torchvision import transforms
+
+try:
+    import transformer_engine as te
+    from transformer_engine.pytorch.attention import DotProductAttention
+
+except Exception as e:
+    print('Importing TransformerEngine failed. Falling back to PyTorch SDPA. The import error was:')
+    print(e)
+    te = None
 
 
 def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
@@ -127,7 +133,6 @@ def apply_rotary_pos_emb(
     fused: bool = False,
     cu_seqlens: Union[torch.Tensor, None] = None,
     cp_size: int = 1,
-    cp_rank: int = 0,
 ) -> torch.Tensor:
     """
     Apply rotary positional embedding tensor to the input tensor.
@@ -347,12 +352,14 @@ class Attention(nn.Module):
         head_dim: int = 64,
         dropout: float = 0.0,
         qkv_format: str = "bshd",
-        backend: str = "torch",
+        backend: str = "transformer_engine",
     ) -> None:
         super().__init__()
         self.is_selfattn = context_dim is None  # self attention
 
-        assert backend in ["transformer_engine", "torch", "minimal_a2a"], f"Invalid backend: {backend}"
+        if backend not in ["transformer_engine", "torch"]:
+            raise NotImplementedError(f"Unrecognized {backend=}.")
+
         self.backend = backend
 
         context_dim = query_dim if context_dim is None else context_dim
@@ -376,7 +383,16 @@ class Attention(nn.Module):
         self.output_proj = nn.Linear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
 
-        if self.backend == "torch":
+        if self.backend == "transformer_engine":
+            self.attn_op = DotProductAttention(
+                self.n_heads,
+                self.head_dim,
+                num_gqa_groups=self.n_heads,
+                attention_dropout=0,
+                qkv_format=qkv_format,
+                attn_mask_type="no_mask",
+            )
+        elif self.backend == "torch":
             self.attn_op = torch_attention_op
         else:
             raise NotImplementedError()
@@ -444,6 +460,7 @@ class Attention(nn.Module):
         Args:
             x (Tensor): The query tensor of shape [B, Mq, K]
             context (Optional[Tensor]): The key tensor of shape [B, Mk, K] or use x as context [self attention] if None
+            rope_emb (Optional[Tensor]): RoPE embedding tensor, or no RoPE embeddings (i.e. in cross attention)
         """
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
         return self.compute_attention(q, k, v)
@@ -952,16 +969,24 @@ class Block(nn.Module):
         mlp_ratio: float = 4.0,
         use_adaln_lora: bool = False,
         adaln_lora_dim: int = 256,
-        backend: str = "transformer_engine",
+        self_attention_backend: str = "transformer_engine",
+        cross_attention_backend: str = "transformer_engine",
     ):
         super().__init__()
         self.x_dim = x_dim
         self.layer_norm_self_attn = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
-        self.self_attn = Attention(x_dim, None, num_heads, x_dim // num_heads, qkv_format="bshd", backend=backend)
+        self.self_attn = Attention(
+            x_dim,
+            None,
+            num_heads,
+            x_dim // num_heads,
+            qkv_format="bshd",
+            backend=self_attention_backend,
+        )
 
         self.layer_norm_cross_attn = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
         self.cross_attn = Attention(
-            x_dim, context_dim, num_heads, x_dim // num_heads, qkv_format="bshd", backend=backend
+            x_dim, context_dim, num_heads, x_dim // num_heads, qkv_format="bshd", backend=cross_attention_backend
         )
 
         self.layer_norm_mlp = nn.LayerNorm(x_dim, elementwise_affine=False, eps=1e-6)
@@ -1173,7 +1198,6 @@ class MiniTrainDIT(nn.Module):
         num_blocks: int = 10,
         num_heads: int = 16,
         mlp_ratio: float = 4.0,
-        atten_backend: str = "torch",
         # cross attention settings
         crossattn_emb_channels: int = 1024,
         # positional embedding settings
@@ -1193,6 +1217,8 @@ class MiniTrainDIT(nn.Module):
         extra_t_extrapolation_ratio: float = 1.0,
         rope_enable_fps_modulation: bool = True,
     ) -> None:
+        atten_backend = 'transformer_engine' if te is not None else 'torch'
+
         super().__init__()
         self.max_img_h = max_img_h
         self.max_img_w = max_img_w
@@ -1240,7 +1266,8 @@ class MiniTrainDIT(nn.Module):
                     mlp_ratio=mlp_ratio,
                     use_adaln_lora=use_adaln_lora,
                     adaln_lora_dim=adaln_lora_dim,
-                    backend=atten_backend,
+                    self_attention_backend=atten_backend,
+                    cross_attention_backend=atten_backend,
                 )
                 for _ in range(num_blocks)
             ]
@@ -1257,7 +1284,6 @@ class MiniTrainDIT(nn.Module):
 
         self.t_embedding_norm = RMSNorm(model_channels, eps=1e-6)
         self.init_weights()
-        self._is_context_parallel_enabled = False
 
     def init_weights(self) -> None:
         self.x_embedder.init_weights()

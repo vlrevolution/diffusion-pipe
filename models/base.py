@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+import tarfile
 
 import peft
 import torch
@@ -71,19 +72,33 @@ class PreprocessMediaFile:
         self.round_frames = round_frames
         if self.support_video:
             assert self.framerate
+        self.tarfile_map = {}
 
-    def __call__(self, filepath, mask_filepath, size_bucket=None):
-        is_video = (Path(filepath).suffix in VIDEO_EXTENSIONS)
+    def __del__(self):
+        for tar_f in self.tarfile_map.values():
+            tar_f.close()
+
+    def __call__(self, spec, mask_filepath, size_bucket=None):
+        is_video = (Path(spec[1]).suffix in VIDEO_EXTENSIONS)
+
+        if spec[0] is None:
+            tar_f = None
+            file_obj = open(spec[1], 'rb')
+        else:
+            tar_filename = spec[0]
+            tar_f = self.tarfile_map.setdefault(tar_filename, tarfile.TarFile(tar_filename))
+            file_obj = tar_f.extractfile(str(spec[1]))
+
         if is_video:
             assert self.support_video
             num_frames = 0
-            for frame in imageio.v3.imiter(filepath, fps=self.framerate):
+            for frame in imageio.v3.imiter(file_obj, fps=self.framerate):
                 num_frames += 1
                 height, width = frame.shape[:2]
-            video = imageio.v3.imiter(filepath, fps=self.framerate)
+            video = imageio.v3.imiter(file_obj, fps=self.framerate)
         else:
             num_frames = 1
-            pil_img = Image.open(filepath)
+            pil_img = Image.open(file_obj)
             height, width = pil_img.height, pil_img.width
             video = [pil_img]
 
@@ -104,7 +119,7 @@ class PreprocessMediaFile:
             if mask_hw != img_hw:
                 raise ValueError(
                     f'Mask shape {mask_hw} was not the same as image shape {img_hw}.\n'
-                    f'Image path: {filepath}\n'
+                    f'Image path: {spec[1]}\n'
                     f'Mask path: {mask_filepath}'
                 )
             mask_img = ImageOps.fit(mask_img, resize_wh)
@@ -118,6 +133,8 @@ class PreprocessMediaFile:
                 frame = torchvision.transforms.functional.to_pil_image(frame)
             cropped_image = convert_crop_and_resize(frame, resize_wh)
             resized_video[i, ...] = self.pil_to_tensor(cropped_image)
+
+        file_obj.close()
 
         if not self.support_video:
             return [(resized_video.squeeze(0), mask)]
@@ -227,7 +244,7 @@ class BasePipeline:
     # Get param groups that will be passed into the optimizer. Models can override this, e.g. SDXL
     # supports separate learning rates for unet and text encoders.
     def get_param_groups(self, parameters):
-        return parameters
+        return [{'params': parameters}]
 
     # Default loss_fn. MSE between output and target, with mask support.
     def get_loss_fn(self):

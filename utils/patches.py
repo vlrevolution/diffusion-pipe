@@ -21,6 +21,7 @@ except ModuleNotFoundError:
     from torch import inf
 from deepspeed.accelerator import get_accelerator
 
+from . import reduction
 import hyvideo.text_encoder
 from hyvideo.constants import PRECISION_TO_TYPE, TEXT_ENCODER_PATH
 
@@ -262,3 +263,6 @@ def apply_patches():
 
     # Don't fail if there are no trainable parameters on a stage.
     deepspeed.runtime.engine.DeepSpeedEngine.clip_fp32_gradients = lambda self: clip_grad_norm_(parameters=self.module.parameters(), max_norm=self.gradient_clipping(), mpu=self.mpu)
+
+    # Efficiently send Tensors across Queues and Pipes when using the third-party multiprocess library.
+    reduction.init_reductions()
