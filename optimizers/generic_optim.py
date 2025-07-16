@@ -241,6 +241,7 @@ class GenericOptim(Optimizer):
             correct_dim=False,
             cpu_offload=False,
             muon=False,
+            adamuon=False,
             compile=False,
     ):
         self.momentum_type = momentum_type
@@ -257,14 +258,17 @@ class GenericOptim(Optimizer):
             raise ValueError(f"Invalid beta parameter: {betas[1]} - should be in [0.0, 1.0]")
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
+        if muon and adamuon:
+            raise ValueError('Only one of muon, adamuon can be True')
+
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim,
-                    'cpu_offload': cpu_offload, 'muon': muon, 'compile': compile}
+                    'cpu_offload': cpu_offload, 'muon': muon, 'adamuon': adamuon, 'compile': compile}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
               f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
-              f"cpu_offload={cpu_offload}, muon={muon}, compile={compile}")
+              f"cpu_offload={cpu_offload}, muon={muon}, adamuon={adamuon}, compile={compile}")
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -303,8 +307,11 @@ class GenericOptim(Optimizer):
 
                 # get momentum
                 numerator = self.get_numerator(group, state, p, state_device)
+                can_use_muon = numerator.ndim > 1
+                muon = group['muon'] and can_use_muon
+                adamuon = group['adamuon'] and can_use_muon
 
-                if group['muon'] and numerator.ndim > 1:
+                if muon or adamuon:
                     rows, cols = numerator.shape[-2:]
                     if numerator.ndim == 4: # for the case of conv filters
                         numerator = numerator.view(len(numerator), -1)
@@ -316,14 +323,24 @@ class GenericOptim(Optimizer):
                     else:
                         orthogonalize = zeropower_via_newtonschulz5
                     numerator = orthogonalize(numerator, steps=NS_STEPS)
+
+                if muon:
                     step_size *= math.sqrt(max(rows, cols))
                     denominator = None
+                elif adamuon:
+                    denominator = self.get_denominator(group, state, numerator, state_device)
+                    numerator.div_(denominator)
+                    if group["correct_bias"]:
+                        beta1, beta2 = group["betas"]
+                        bias_correction2 = 1.0 - beta2 ** state["step"]
+                        numerator.mul_(math.sqrt(bias_correction2))
+                    step_size /= math.sqrt(torch.mean(numerator**2).item()) + group['eps']
+                    denominator = None
                 else:
-                    # get adaptive step size
-                    denominator = self.get_denominator(group, state, p, state_device)
+                    denominator = self.get_denominator(group, state, p.grad, state_device)
                     # Bias correction
                     beta1, beta2 = group["betas"]
-                    if group["correct_bias"]:  # No bias correction for Bert
+                    if group["correct_bias"]:
                         bias_correction1 = 1.0 - beta1 ** state["step"]
                         bias_correction2 = 1.0 - beta2 ** state["step"]
                         step_size = step_size * math.sqrt(bias_correction2) / bias_correction1
@@ -394,15 +411,14 @@ class GenericOptim(Optimizer):
         else:
             raise ValueError(f"Unrecognized momentum_type = {self.momentum_type}.")
 
-    def get_denominator(self, group, state, p, state_device):
-        grad = p.grad
+    def get_denominator(self, group, state, grad, state_device):
         beta1, beta2 = group["betas"]
         if beta2 == 0 or self.second_moment_type == "none":
             return None  # this means only use base lr
         elif self.second_moment_type == "ema":  # Adam style
             if "exp_avg_sq" not in state:  # initialization
                 state["exp_avg_sq"] = torch.zeros_like(grad)
-            exp_avg_sq = state["exp_avg_sq"].to(p.device, non_blocking=True)
+            exp_avg_sq = state["exp_avg_sq"].to(grad.device, non_blocking=True)
             if beta2 < 1:  # EMA
                 exp_avg_sq.mul_(beta2).add_(grad**2, alpha=1.0 - beta2)
             else:  # == 1 means AdaGrad
