@@ -83,22 +83,22 @@ class PreprocessMediaFile:
 
         if spec[0] is None:
             tar_f = None
-            file_obj = open(spec[1], 'rb')
+            filepath_or_file = str(spec[1])
         else:
             tar_filename = spec[0]
             tar_f = self.tarfile_map.setdefault(tar_filename, tarfile.TarFile(tar_filename))
-            file_obj = tar_f.extractfile(str(spec[1]))
+            filepath_or_file = tar_f.extractfile(str(spec[1]))
 
         if is_video:
             assert self.support_video
             num_frames = 0
-            for frame in imageio.v3.imiter(file_obj, fps=self.framerate):
+            for frame in imageio.v3.imiter(filepath_or_file, fps=self.framerate):
                 num_frames += 1
                 height, width = frame.shape[:2]
-            video = imageio.v3.imiter(file_obj, fps=self.framerate)
+            video = imageio.v3.imiter(filepath_or_file, fps=self.framerate)
         else:
             num_frames = 1
-            pil_img = Image.open(file_obj)
+            pil_img = Image.open(filepath_or_file)
             height, width = pil_img.height, pil_img.width
             video = [pil_img]
 
@@ -134,7 +134,8 @@ class PreprocessMediaFile:
             cropped_image = convert_crop_and_resize(frame, resize_wh)
             resized_video[i, ...] = self.pil_to_tensor(cropped_image)
 
-        file_obj.close()
+        if hasattr(filepath_or_file, 'close'):
+            filepath_or_file.close()
 
         if not self.support_video:
             return [(resized_video.squeeze(0), mask)]
