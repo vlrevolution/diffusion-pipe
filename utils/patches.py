@@ -241,6 +241,54 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     return total_norm
 
 
+def copy_args_to_cpu_if_needed(self, *args, **kwargs):
+    """
+    To support benchmarking in the presence of mutated args, we need to avoid
+    autotuning contanminating them. We try to pass cloned args to the kernel.
+    If those clones would increase the peak memory usage, however, we instead
+    copy to cpu and restore them after each iteration. Figure out the args
+    to be copied and do the copying.
+    """
+    if not self.optimize_mem:
+        return {}
+
+    copies = {}
+    budget = torch.cuda.max_memory_allocated() - torch.cuda.memory_allocated()
+
+    def maybe_copy(name, arg):
+        if name in self.mutated_arg_names and arg.is_cuda:
+            nonlocal budget
+            assert isinstance(arg, torch.Tensor)
+            required_storage_length = torch._prims_common.compute_required_storage_length(
+                arg.size(),
+                arg.stride(),
+                0,
+            )
+            size = required_storage_length * arg.element_size()
+            if size > budget:
+                cpu_arg = torch.empty_strided(
+                    (required_storage_length,),
+                    (1,),
+                    dtype=arg.dtype,
+                    device="cpu",
+                )
+                cpu_arg.copy_(
+                    arg.as_strided((required_storage_length,), (1,)),
+                    non_blocking=True,
+                )
+                copies[name] = (arg, cpu_arg)
+            else:
+                budget -= size
+
+    for name, arg in zip(self.fn.arg_names, args):
+        maybe_copy(name, arg)
+
+    for name, arg in kwargs.items():
+        maybe_copy(name, arg)
+
+    return copies
+
+
 def apply_patches():
     # Prevent PEFT from downcasting LoRA weights to fp8 only for this script to upcast them again.
     # TODO: probably should send a PR to PEFT. Default behavior looks like a mistake to me.
@@ -266,3 +314,6 @@ def apply_patches():
 
     # Efficiently send Tensors across Queues and Pipes when using the third-party multiprocess library.
     reduction.init_reductions()
+
+    # Remove pin_memory=True which is causing failures in some cases when using torch compile.
+    torch._inductor.runtime.triton_heuristics.CachingAutotuner.copy_args_to_cpu_if_needed = copy_args_to_cpu_if_needed
