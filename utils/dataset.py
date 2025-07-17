@@ -18,6 +18,7 @@ from PIL import Image
 import imageio
 import multiprocess as mp
 from tqdm import tqdm
+from tqdm.contrib.concurrent import thread_map
 
 from utils.common import is_main_process, VIDEO_EXTENSIONS, round_to_nearest_multiple
 
@@ -59,6 +60,26 @@ def bucket_suffix(key):
 
 
 def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerprint_args=None, regenerate_cache=False, caching_batch_size=1):
+    # TODO: remove. Currently using this to avoid recaching everything.
+    # cache_arrow_files = list(str(path) for path in cache_dir.glob(f'{cache_file_prefix}*.arrow'))
+    # cache_arrow_files.sort()
+    # if not regenerate_cache and len(cache_arrow_files) > 0:
+    #     if map_fn is not None:
+    #         return None
+
+    #     dataset_shards = thread_map(
+    #         datasets.Dataset.from_file,
+    #         cache_arrow_files,
+    #         desc="Loading from map() cached files",
+    #     )
+
+    #     dataset = datasets.concatenate_datasets(
+    #         #[datasets.Dataset.from_file(f) for f in cache_arrow_files]
+    #         dataset_shards
+    #     )
+    #     dataset.set_format('torch')
+    #     return dataset
+
     # Do the fingerprinting ourselves, because otherwise map() does it by serializing the map function.
     # That goes poorly when the function is capturing huge models (slow, OOMs, etc).
     new_fingerprint_args = [] if new_fingerprint_args is None else new_fingerprint_args
@@ -145,12 +166,18 @@ class SizeBucketDataset:
             regenerate_cache=regenerate_cache,
             caching_batch_size=caching_batch_size,
         )
+        if map_fn is not None:
+            # We can exit early during the caching phase. Only when everything is loaded from cache at the end
+            # do we need the code below.
+            return
+
         iteration_order = []
         for example in self.metadata_dataset.select_columns(['image_spec', 'caption']):
             image_spec = example['image_spec']
             captions = example['caption']
-            for i, caption in enumerate([captions[i:i + self.shuffle_skip] for i in range(0, len(captions), self.shuffle_skip)]):
-                iteration_order.append((image_spec, caption, i))
+            assert len(captions) % self.shuffle_skip == 0
+            for i in range(len(captions) // self.shuffle_skip):
+                iteration_order.append((image_spec, i))
         # Shuffle again, since one media file can produce multiple training examples. E.g. video, or maybe
         # in the future data augmentation. Don't need to shuffle text embeddings since those are looked
         # up by image file name.
@@ -159,6 +186,10 @@ class SizeBucketDataset:
         self.image_spec_to_latents_idx = {
             tuple(image_spec): i
             for i, image_spec in enumerate(self.latent_dataset['image_spec'])
+        }
+        self.image_spec_to_metadata_idx = {
+            tuple(image_spec): i
+            for i, image_spec in enumerate(self.metadata_dataset['image_spec'])
         }
 
 
@@ -172,8 +203,10 @@ class SizeBucketDataset:
 
     def __getitem__(self, idx):
         idx = idx % len(self.iteration_order)
-        image_spec, captions, caption_number = self.iteration_order[idx]
+        image_spec, caption_number = self.iteration_order[idx]
         image_spec = tuple(image_spec)
+        captions = self.metadata_dataset[self.image_spec_to_metadata_idx[image_spec]]['caption']
+
         ret = self.latent_dataset[self.image_spec_to_latents_idx[image_spec]]
         if DEBUG:
             print(Path(image_spec[1]).stem)
@@ -181,7 +214,7 @@ class SizeBucketDataset:
         caption_idx = (caption_number*self.shuffle_skip) + offset
 
         use_uncond = UNCOND_FRACTION > 0 and random.random() < UNCOND_FRACTION
-        caption = '' if use_uncond else captions[offset]
+        caption = '' if use_uncond else captions[caption_idx]
 
         for ds, uncond_ds in zip(self.text_embedding_datasets, self.uncond_text_embeddings):
             emb_dict = uncond_ds[0] if use_uncond else ds.get_text_embeddings(image_spec, caption_idx)
@@ -245,23 +278,29 @@ class ARBucketDataset:
         self.cache_dir = self.path / 'cache' / self.model_name / f'ar_frames_{bucket_suffix(self.ar_frames)}'
         os.makedirs(self.cache_dir, exist_ok=True)
 
-        for res in resolutions:
+    def get_size_bucket_datasets(self):
+        return self.size_buckets
+
+    def cache_latents(self, map_fn, regenerate_cache=False, caching_batch_size=1):
+        print(f'caching latents: {self.ar_frames}')
+
+        for res in self.resolutions:
             area = res**2
             w = math.sqrt(area * self.ar_frames[0])
             h = area / w
             w = round_to_nearest_multiple(w, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             h = round_to_nearest_multiple(h, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             size_bucket = (w, h, self.ar_frames[1])
-            metadata_with_size_bucket = self.metadata_dataset.map(lambda example: {'size_bucket': size_bucket}, keep_in_memory=True, desc='Adding size bucket')
+            metadata_with_size_bucket = self.metadata_dataset.map(
+                lambda example: {'size_bucket': size_bucket},
+                cache_file_name=str(self.cache_dir / 'metadata/metadata_with_size_bucket.arrow'),
+                load_from_cache_file=(not regenerate_cache),
+                desc='Adding size bucket',
+            )
             self.size_buckets.append(
-                SizeBucketDataset(metadata_with_size_bucket, directory_config, size_bucket, model_name)
+                SizeBucketDataset(metadata_with_size_bucket, self.directory_config, size_bucket, self.model_name)
             )
 
-    def get_size_bucket_datasets(self):
-        return self.size_buckets
-
-    def cache_latents(self, map_fn, regenerate_cache=False, caching_batch_size=1):
-        print(f'caching latents: {self.ar_frames}')
         for ds in self.size_buckets:
             ds.cache_latents(map_fn, regenerate_cache=regenerate_cache, caching_batch_size=caching_batch_size)
 
@@ -430,8 +469,8 @@ class DirectoryDataset:
 
     def _get_ungrouped_metadata(self, regenerate_cache=False, trust_cache=False):
         # This method caches some intermediate datasets so we don't have to enumerate all the files each time.
-        metadata_cache_file_1 = self.cache_dir / f'metadata/metadata_intermediate'
-        metadata_cache_file_2 = self.cache_dir / f'metadata/metadata.arrow'
+        metadata_cache_file_1 = self.cache_dir / 'metadata/metadata_intermediate'
+        metadata_cache_file_2 = self.cache_dir / 'metadata/metadata.arrow'
 
         if regenerate_cache or not metadata_cache_file_1.exists() or not trust_cache:
             print('Intermediate metadata is not cached. Enumerating all files.')
@@ -500,7 +539,12 @@ class DirectoryDataset:
                         assert isinstance(captions, list), 'captions.json must contain lists of captions'
                     return {'caption': captions}
 
-                metadata_dataset = metadata_dataset.map(add_captions, keep_in_memory=True, desc='Adding captions')
+                metadata_dataset = metadata_dataset.map(
+                    add_captions,
+                    cache_file_name=str(self.cache_dir / 'metadata/metadata_with_captions.arrow'),
+                    load_from_cache_file=(not regenerate_cache),
+                    desc='Adding captions',
+                )
                 del caption_data
 
             # Shuffle the data. Use a deterministic seed, so the dataset is identical on all processes.
@@ -726,6 +770,9 @@ class Dataset:
         self.dataset_config = dataset_config
         self.model = model
         self.model_name = self.model.name
+        # TODO: remove. Doing this because Wan and Cosmos-Predict2 use the same latents.
+        # if self.model_name == 'wan' and len(self.model.get_text_encoders()) == 0:
+        #     self.model_name = 'cosmos_predict2'
         self.post_init_called = False
         self.eval_quantile = None
         if not skip_dataset_validation:
