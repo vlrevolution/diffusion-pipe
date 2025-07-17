@@ -465,11 +465,19 @@ class GenericOptim(Optimizer):
             raise ValueError("Set second_moment_type to use subspace-momentum (sm) but have not seen any rank set "
                              " in any param_groups. If you meant to use EMA, please set momentum_type='ema'")
 
-    # The projector is a class which contains tensors, so state needs to be explicitly moved to the correct device.
     def load_state_dict(self, sd):
         super().load_state_dict(sd)
         for group in self.param_groups:
             for p in group['params']:
                 state = self.state[p]
+                # State is moved to the device of the param, so for offloaded state, move to CPU.
+                # TODO: this kind of works but is suboptimal. It is still initially loading all state
+                # on GPU. This uses more VRAM than necessary, but it isn't too bad because it happens
+                # before any training steps.
+                cpu_offload = group['cpu_offload'] if p.ndim >= 2 else False
+                for k, v in state.items():
+                    if torch.is_tensor(v) and cpu_offload:
+                        state[k] = v.to('cpu')
+                # The projector is a class which contains tensors, so state needs to be explicitly moved to the correct device.
                 if 'projector' in state:
                     state['projector'].to(p.device)
