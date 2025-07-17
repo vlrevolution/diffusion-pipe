@@ -748,8 +748,8 @@ if __name__ == '__main__':
     # TODO: this is state we need to save and resume when resuming from checkpoint. It only affects logging.
     epoch_loss = 0
     num_steps = 0
+    empty_cuda_cache()
     while True:
-        #empty_cuda_cache()
         model_engine.reset_activation_shape()
         iterator = get_data_iterator_for_step(train_dataloader, model_engine)
         loss = model_engine.train_batch(iterator).item()
