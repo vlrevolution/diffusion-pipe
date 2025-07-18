@@ -606,15 +606,15 @@ class DirectoryDataset:
 
             if image_spec[0] is None:
                 tar_f = None
-                file_obj = open(image_file, 'rb')
+                filepath_or_file = str(image_file)
             else:
                 tar_filename = image_spec[0]
                 tar_f = tarfile_map.setdefault(tar_filename, tarfile.TarFile(tar_filename))
-                file_obj = tar_f.extractfile(str(image_file))
+                filepath_or_file = tar_f.extractfile(str(image_file))
 
             if image_file.suffix == '.webp':
-                # Make sure this this object stays alive so it doesn't close file_obj on us.
-                reader = imageio.get_reader(file_obj)
+                # Make sure this this object stays alive so it doesn't close the file on us.
+                reader = imageio.get_reader(filepath_or_file)
                 frames = reader.get_length()
                 if frames > 1:
                     raise NotImplementedError('WebP videos are not supported.')
@@ -627,20 +627,21 @@ class DirectoryDataset:
                     #     height, width = frame.shape[:2]
                     # TODO: this is an estimate of frame count. What happens if variable frame rate? Is
                     # it still close enough?
-                    meta = imageio.v3.immeta(file_obj)
-                    first_frame = next(imageio.v3.imiter(file_obj))
+                    meta = imageio.v3.immeta(filepath_or_file)
+                    first_frame = next(imageio.v3.imiter(filepath_or_file))
                     height, width = first_frame.shape[:2]
                     assert self.framerate is not None, "Need model framerate but don't have it. This shouldn't happen. Is the framerate attribute on the model set?"
                     frames = int(self.framerate * meta['duration'])
                 else:
-                    pil_img = Image.open(file_obj)
+                    pil_img = Image.open(filepath_or_file)
                     width, height = pil_img.size
                     frames = 1
             except Exception as e:
-                logger.warning(f'Media file {image_file} could not be opened. Skipping.')
+                logger.warning(f'Media file {image_file} could not be opened. Skipping. The exception was: {e}')
                 return empty_return
             finally:
-                file_obj.close()
+                if hasattr(filepath_or_file, 'close'):
+                    filepath_or_file.close()
 
             is_video = (frames > 1)
             log_ar = np.log(width / height)
