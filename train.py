@@ -731,8 +731,6 @@ if __name__ == '__main__':
     model_engine.total_steps = steps_per_epoch * config['epochs']
 
     eval_dataloaders = {
-        # Set num_dataloader_workers=0 so dataset iteration is completely deterministic.
-        # We want the exact same noise for each image, each time, for a stable validation loss.
         name: dataset_util.PipelineDataLoader(eval_data, model_engine, config['eval_gradient_accumulation_steps'], model, num_dataloader_workers=0)
         for name, eval_data in eval_data_map.items()
     }
