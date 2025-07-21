@@ -388,7 +388,7 @@ class GenericOptim(Optimizer):
             torch.cuda.synchronize()
 
         if len(skipped_parameter_names) > 0:
-            print(f'WARNING: the following parameters had their updates skipped due to Inf or NaN: {skipped_parameter_names}')
+            print(f'WARNING: {len(skipped_parameter_names)} parameter updates were skipped due to Inf or NaN.')
 
         return loss
 
