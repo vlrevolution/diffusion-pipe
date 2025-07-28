@@ -63,7 +63,7 @@ def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerp
     # TODO: remove. Currently using this to avoid recaching everything.
     # cache_arrow_files = list(str(path) for path in cache_dir.glob(f'{cache_file_prefix}*.arrow'))
     # cache_arrow_files.sort()
-    # if not regenerate_cache and len(cache_arrow_files) > 0:
+    # if len(cache_arrow_files) > 0:
     #     dataset_shards = thread_map(
     #         datasets.Dataset.from_file,
     #         cache_arrow_files,

@@ -1,10 +1,7 @@
-import sys
 import json
-import math
 import re
 import os.path
 from pathlib import Path
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), '../submodules/Wan2_1'))
 
 import torch
 from torch import nn
@@ -16,15 +13,14 @@ from accelerate.utils import set_module_tensor_to_device
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
 from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift
 from utils.offloading import ModelOffloader
-import wan
-from wan.modules.t5 import T5Encoder, T5Decoder, T5Model
-from wan.modules.tokenizers import HuggingfaceTokenizer
-from wan.modules.vae import WanVAE
-from wan.modules.model import (
-    WanModel, sinusoidal_embedding_1d, WanLayerNorm, WanSelfAttention, WAN_CROSSATTENTION_CLASSES
+from .t5 import T5EncoderModel
+from .vae2_1 import Wan2_1_VAE
+from .model import (
+    WanModel, sinusoidal_embedding_1d
 )
-from wan.modules.clip import CLIPModel
-from wan import configs as wan_configs
+from .clip import CLIPModel
+from . import configs as wan_configs
+
 from safetensors.torch import load_file
 
 KEEP_IN_HIGH_PRECISION = ['norm', 'bias', 'patch_embedding', 'text_embedding', 'time_embedding', 'time_projection', 'head', 'modulation']
@@ -59,191 +55,9 @@ class WanModelFromSafetensors(WanModel):
 
         return model
 
+
 def vae_encode(tensor, vae):
     return vae.model.encode(tensor, vae.scale)
-
-def umt5_keys_mapping_comfy(state_dict):
-    import re
-    # define key mappings rule
-    def execute_mapping(original_key):
-        # Token embedding mapping
-        if original_key == "shared.weight":
-            return "token_embedding.weight"
-
-        # Final layer norm mapping
-        if original_key == "encoder.final_layer_norm.weight":
-            return "norm.weight"
-
-        # Block layer mappings
-        block_match = re.match(r"encoder\.block\.(\d+)\.layer\.(\d+)\.(.+)", original_key)
-        if block_match:
-            block_num = block_match.group(1)
-            layer_type = int(block_match.group(2))
-            rest = block_match.group(3)
-
-            # self-attn layer（layer.0）
-            if layer_type == 0:
-                if "SelfAttention" in rest:
-                    attn_part = rest.split(".")[1]
-                    if attn_part in ["q", "k", "v", "o"]:
-                        return f"blocks.{block_num}.attn.{attn_part}.weight"
-                    elif attn_part == "relative_attention_bias":
-                        return f"blocks.{block_num}.pos_embedding.embedding.weight"
-                elif rest == "layer_norm.weight":
-                    return f"blocks.{block_num}.norm1.weight"
-
-            # FFN Layer（layer.1）
-            elif layer_type == 1:
-                if "DenseReluDense" in rest:
-                    parts = rest.split(".")
-                    if parts[1] == "wi_0":
-                        return f"blocks.{block_num}.ffn.gate.0.weight"
-                    elif parts[1] == "wi_1":
-                        return f"blocks.{block_num}.ffn.fc1.weight"
-                    elif parts[1] == "wo":
-                        return f"blocks.{block_num}.ffn.fc2.weight"
-                elif rest == "layer_norm.weight":
-                    return f"blocks.{block_num}.norm2.weight"
-
-        return None
-
-    new_state_dict = {}
-    unmapped_keys = []
-
-    for key, value in state_dict.items():
-        new_key = execute_mapping(key)
-        if new_key:
-            new_state_dict[new_key] = value
-        else:
-            unmapped_keys.append(key)
-
-    print(f"Unmapped keys (usually safe to ignore): {unmapped_keys}")
-    del state_dict
-    return new_state_dict
-
-
-def umt5_keys_mapping_kijai(state_dict):
-    new_state_dict = {}
-    for key, value in state_dict.items():
-        new_key = key.replace("attention.", "attn.")
-        new_key = new_key.replace("final_norm.weight", "norm.weight")
-        new_state_dict[new_key] = value
-    del state_dict
-    return new_state_dict
-
-def umt5_keys_mapping(state_dict):
-    if 'blocks.0.attn.k.weight' in state_dict:
-        print("loading kijai warpper umt5 safetensors model...")
-        return umt5_keys_mapping_kijai(state_dict)
-    else:
-        print("loading comfyui repacked umt5 safetensors model...")
-        return umt5_keys_mapping_comfy(state_dict)
-
-# We can load T5 a lot faster by copying some code so we can construct the model
-# inside an init_empty_weights() context.
-
-def _t5(name,
-        encoder_only=False,
-        decoder_only=False,
-        return_tokenizer=False,
-        tokenizer_kwargs={},
-        dtype=torch.float32,
-        device='cpu',
-        **kwargs):
-    # sanity check
-    assert not (encoder_only and decoder_only)
-
-    # params
-    if encoder_only:
-        model_cls = T5Encoder
-        kwargs['vocab'] = kwargs.pop('vocab_size')
-        kwargs['num_layers'] = kwargs.pop('encoder_layers')
-        _ = kwargs.pop('decoder_layers')
-    elif decoder_only:
-        model_cls = T5Decoder
-        kwargs['vocab'] = kwargs.pop('vocab_size')
-        kwargs['num_layers'] = kwargs.pop('decoder_layers')
-        _ = kwargs.pop('encoder_layers')
-    else:
-        model_cls = T5Model
-
-    # init model
-    with torch.device(device):
-        model = model_cls(**kwargs)
-
-    # init tokenizer
-    if return_tokenizer:
-        tokenizer = HuggingfaceTokenizer(f'google/{name}', **tokenizer_kwargs)
-        return model, tokenizer
-    else:
-        return model
-
-
-def umt5_xxl(**kwargs):
-    cfg = dict(
-        vocab_size=256384,
-        dim=4096,
-        dim_attn=4096,
-        dim_ffn=10240,
-        num_heads=64,
-        encoder_layers=24,
-        decoder_layers=24,
-        num_buckets=32,
-        shared_pos=False,
-        dropout=0.1)
-    cfg.update(**kwargs)
-    return _t5('umt5-xxl', **cfg)
-
-
-class T5EncoderModel:
-
-    def __init__(
-        self,
-        text_len,
-        dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
-        checkpoint_path=None,
-        tokenizer_path=None,
-        shard_fn=None,
-    ):
-        self.text_len = text_len
-        self.dtype = dtype
-        self.device = device
-        self.checkpoint_path = checkpoint_path
-        self.tokenizer_path = tokenizer_path
-
-        # init model
-        with init_empty_weights():
-            model = umt5_xxl(
-                encoder_only=True,
-                return_tokenizer=False,
-                dtype=dtype,
-                device=device).eval().requires_grad_(False)
-
-        if checkpoint_path.endswith('.safetensors'):
-            state_dict = load_file(checkpoint_path, device='cpu')
-            state_dict = umt5_keys_mapping(state_dict)
-        else:
-            state_dict = torch.load(checkpoint_path, map_location='cpu')
-
-        model.load_state_dict(state_dict, assign=True)
-        self.model = model
-        if shard_fn is not None:
-            self.model = shard_fn(self.model, sync_module_states=False)
-        else:
-            self.model.to(self.device)
-        # init tokenizer
-        self.tokenizer = HuggingfaceTokenizer(
-            name=tokenizer_path, seq_len=text_len, clean='whitespace')
-
-    def __call__(self, texts, device):
-        ids, mask = self.tokenizer(
-            texts, return_mask=True, add_special_tokens=True)
-        ids = ids.to(device)
-        mask = mask.to(device)
-        seq_lens = mask.gt(0).sum(dim=1).long()
-        context = self.model(ids, mask)
-        return [u[:v] for u, v in zip(context, seq_lens)]
 
 
 # Wrapper to hold both VAE and CLIP, so we can move both to/from GPU together.
@@ -252,117 +66,6 @@ class VaeAndClip(nn.Module):
         super().__init__()
         self.vae = vae
         self.clip = clip
-
-
-class WanAttentionBlock(nn.Module):
-
-    def __init__(self,
-                 cross_attn_type,
-                 dim,
-                 ffn_dim,
-                 num_heads,
-                 window_size=(-1, -1),
-                 qk_norm=True,
-                 cross_attn_norm=False,
-                 eps=1e-6):
-        super().__init__()
-        self.dim = dim
-        self.ffn_dim = ffn_dim
-        self.num_heads = num_heads
-        self.window_size = window_size
-        self.qk_norm = qk_norm
-        self.cross_attn_norm = cross_attn_norm
-        self.eps = eps
-
-        # layers
-        self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
-                                          eps)
-        self.norm3 = WanLayerNorm(
-            dim, eps,
-            elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = WAN_CROSSATTENTION_CLASSES[cross_attn_type](dim,
-                                                                      num_heads,
-                                                                      (-1, -1),
-                                                                      qk_norm,
-                                                                      eps)
-        self.norm2 = WanLayerNorm(dim, eps)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
-            nn.Linear(ffn_dim, dim))
-
-        # modulation
-        self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
-
-    def forward(
-        self,
-        x,
-        e,
-        seq_lens,
-        grid_sizes,
-        freqs,
-        context,
-        context_lens,
-    ):
-        r"""
-        Args:
-            x(Tensor): Shape [B, L, C]
-            e(Tensor): Shape [B, 6, C]
-            seq_lens(Tensor): Shape [B], length of each sequence in batch
-            grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
-            freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
-        """
-        e = (self.modulation + e).chunk(6, dim=1)
-
-        # self-attention
-        y = self.self_attn(
-            self.norm1(x) * (1 + e[1]) + e[0], seq_lens, grid_sizes,
-            freqs)
-        x = x + y * e[2]
-
-        # cross-attention & ffn function
-        def cross_attn_ffn(x, context, context_lens, e):
-            x = x + self.cross_attn(self.norm3(x), context, context_lens)
-            y = self.ffn(self.norm2(x) * (1 + e[4]) + e[3])
-            x = x + y * e[5]
-            return x
-
-        x = cross_attn_ffn(x, context, context_lens, e)
-        return x
-
-
-class Head(nn.Module):
-
-    def __init__(self, dim, out_dim, patch_size, eps=1e-6):
-        super().__init__()
-        self.dim = dim
-        self.out_dim = out_dim
-        self.patch_size = patch_size
-        self.eps = eps
-
-        # layers
-        out_dim = math.prod(patch_size) * out_dim
-        self.norm = WanLayerNorm(dim, eps)
-        self.head = nn.Linear(dim, out_dim)
-
-        # modulation
-        self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
-
-    def forward(self, x, e):
-        r"""
-        Args:
-            x(Tensor): Shape [B, L1, C]
-            e(Tensor): Shape [B, C]
-        """
-        with torch.autocast('cuda', dtype=torch.float32):
-            e = (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
-            x = (self.head(self.norm(x) * (1 + e[1]) + e[0]))
-        return x
-
-
-# Patch these to remove some forced casting to float32, saving memory.
-wan.modules.model.WanAttentionBlock = WanAttentionBlock
-wan.modules.model.Head = Head
 
 
 class WanPipeline(BasePipeline):
@@ -438,7 +141,7 @@ class WanPipeline(BasePipeline):
         self.text_encoder.model.requires_grad_(False)
 
         # Same here, this isn't a nn.Module.
-        self.vae = WanVAE(
+        self.vae = Wan2_1_VAE(
             vae_pth=os.path.join(ckpt_dir, wan_config.vae_checkpoint),
             device='cpu',
             dtype=dtype,
