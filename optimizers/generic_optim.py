@@ -323,6 +323,7 @@ class GenericOptim(Optimizer):
                     else:
                         orthogonalize = zeropower_via_newtonschulz5
                     numerator = orthogonalize(numerator, steps=NS_STEPS)
+                    step_size *= 0.2
 
                 if muon:
                     step_size *= math.sqrt(max(rows, cols))
