@@ -15,6 +15,7 @@ from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift
 from utils.offloading import ModelOffloader
 from .t5 import T5EncoderModel
 from .vae2_1 import Wan2_1_VAE
+from .vae2_2 import Wan2_2_VAE
 from .model import (
     WanModel, sinusoidal_embedding_1d
 )
@@ -31,13 +32,10 @@ class WanModelFromSafetensors(WanModel):
     def from_pretrained(
         cls,
         weights_file,
-        config_file,
+        config,
         torch_dtype=torch.bfloat16,
         transformer_dtype=torch.bfloat16,
     ):
-        with open(config_file, "r", encoding="utf-8") as f:
-            config = json.load(f)
-
         config.pop("_class_name", None)
         config.pop("_diffusers_version", None)
 
@@ -78,51 +76,104 @@ class WanPipeline(BasePipeline):
         self.config = config
         self.model_config = self.config['model']
         self.offloader = ModelOffloader('dummy', [], 0, 0, True, torch.device('cuda'), False, debug=False)
-        ckpt_dir = self.model_config['ckpt_path']
-        dtype = self.model_config['dtype']
         self.cache_text_embeddings = self.model_config.get('cache_text_embeddings', True)
 
+        # The official Wan top-level checkpoint folder. Must exist.
+        ckpt_dir = Path(self.model_config['ckpt_path'])
+        dtype = self.model_config['dtype']
+
+        # transformer_path will either be a directory containing safetensors files, or directly point to a safetensors file
+        self.transformer_path = Path(self.model_config.get('transformer_path', ckpt_dir))
+        if self.transformer_path.is_dir():
+            # If it's a directory, we assume the config JSON exists inside it, along with the safetensors files.
+            self.original_model_config_path = self.transformer_path / 'config.json'
+            safetensors_files = list(self.transformer_path.glob('*.safetensors'))
+        else:
+            # If it's a single file, the config JSON is assumed to be in the top-level checkpoint folder.
+            self.original_model_config_path = ckpt_dir / 'config.json'
+            if not self.original_model_config_path.exists():
+                # Wan2.2 has subdirectories for the model. Automatically handle that.
+                self.original_model_config_path = ckpt_dir / 'low_noise_model' / 'config.json'
+            safetensors_files = [self.transformer_path]
+
+        # get all weight keys
+        weight_keys = set()
+        for shard in safetensors_files:
+            with safetensors.safe_open(shard, framework="pt", device="cpu") as f:
+                for k in f.keys():
+                    weight_keys.add(re.sub(r'^model\.diffusion_model\.', '', k))
+
         # SkyReels V2 uses 24 FPS. There seems to be no better way to autodetect this.
-        if 'skyreels' in Path(ckpt_dir).name.lower():
+        if 'skyreels' in ckpt_dir.name.lower():
             skyreels = True
             self.framerate = 24
-            # FPS is different so make sure to use a new cache dir
-            self.name = 'skyreels_v2'
         else:
             skyreels = False
 
-        self.original_model_config_path = os.path.join(ckpt_dir, 'config.json')
         with open(self.original_model_config_path) as f:
-            json_config = json.load(f)
-        self.i2v = (json_config['model_type'] == 'i2v')
-        self.flf2v = (json_config['model_type'] == 'flf2v')
-        if self.i2v:
+            self.json_config = json.load(f)
+
+        model_type = self.json_config['model_type']
+        model_dim = self.json_config['dim']
+
+        def autodetect_error():
+            raise RuntimeError(f'Could not autodetect model variant. model_type={model_type}, model_dim={model_dim}')
+
+        if model_type == 't2v':
             if skyreels:
-                self.name = 'skyreels_v2_i2v'
+                # FPS is different so make sure to use a new cache dir
+                self.name = 'skyreels_v2'
+            if model_dim == 1536:
+                wan_config = wan_configs.t2v_1_3B
+            elif model_dim == 5120:
+                # This config also works with Wan2.2 T2V.
+                wan_config = wan_configs.t2v_14B
             else:
-                self.name = 'wan_i2v'
-        if self.flf2v:
+                autodetect_error()
+        elif model_type == 'i2v':
+            if 'blocks.0.cross_attn.k_img.weight' not in weight_keys:
+                # Wan2.2 I2V
+                model_type = 'i2v_v2'
+                self.name = 'wan2.2_i2v'
+                if model_dim == 5120:
+                    wan_config = wan_configs.i2v_A14B
+                else:
+                    autodetect_error()
+            else:
+                if skyreels:
+                    self.name = 'skyreels_v2_i2v'
+                else:
+                    self.name = 'wan_i2v'
+                if model_dim == 1536: # There is no official i2v 1.3b model, but there is https://huggingface.co/alibaba-pai/Wan2.1-Fun-1.3B-InP
+                    # This is a hack,
+                    wan_config = wan_configs.t2v_1_3B
+                    # The following lines are taken from https://github.com/Wan-Video/Wan2.1/blob/main/wan/configs/wan_i2v_14B.py
+                    wan_config.clip_model = 'clip_xlm_roberta_vit_h_14'
+                    wan_config.clip_dtype = torch.float16
+                    wan_config.clip_checkpoint = 'models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth'
+                elif model_dim == 5120:
+                    wan_config = wan_configs.i2v_14B
+                else:
+                    autodetect_error()
+        elif model_type == 'flf2v':
             assert not skyreels
             self.name = 'wan_flf2v'
-        model_dim = json_config['dim']
-        if not self.i2v and model_dim == 1536:
-            wan_config = wan_configs.t2v_1_3B
-        elif self.i2v and model_dim == 1536: # There is no official i2v 1.3b model, but there is https://huggingface.co/alibaba-pai/Wan2.1-Fun-1.3B-InP
-            # This is a hack,
-            wan_config = wan_configs.t2v_1_3B
-            # The following lines are taken from https://github.com/Wan-Video/Wan2.1/blob/main/wan/configs/wan_i2v_14B.py
-            wan_config.clip_model = 'clip_xlm_roberta_vit_h_14'
-            wan_config.clip_dtype = torch.float16
-            wan_config.clip_checkpoint = 'models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth'
-            wan_config.clip_tokenizer = 'xlm-roberta-large'
-        elif self.i2v and model_dim == 5120:
-            wan_config = wan_configs.i2v_14B
-        elif self.flf2v and model_dim == 5120:
-            wan_config = wan_configs.flf2v_14B
-        elif not self.i2v and model_dim == 5120:
-            wan_config = wan_configs.t2v_14B
+            if model_dim == 5120:
+                wan_config = wan_configs.i2v_14B  # flf2v is same config as i2v
+            else:
+                autodetect_error()
+        elif model_type == 'ti2v':
+            self.name = 'wan2.2_5b'
+            self.framerate = 24
+            if model_dim == 3072:
+                wan_config = wan_configs.ti2v_5B
+            else:
+                autodetect_error()
         else:
-            raise RuntimeError(f'Could not autodetect model variant. model_dim={model_dim}, i2v={self.i2v}, flf2v={self.flf2v}')
+            raise RuntimeError(f'Unknown model_type: {model_type}')
+
+        self.model_type = model_type
+        self.json_config['model_type'] = model_type  # to handle the special i2v_v2 type we introduced
 
         # This is the outermost class, which isn't a nn.Module
         t5_model_path = self.model_config['llm_path'] if self.model_config.get('llm_path', None) else os.path.join(ckpt_dir, wan_config.t5_checkpoint)
@@ -131,7 +182,7 @@ class WanPipeline(BasePipeline):
             dtype=dtype,
             device='cpu',
             checkpoint_path=t5_model_path,
-            tokenizer_path=os.path.join(ckpt_dir, wan_config.t5_tokenizer),
+            tokenizer_path=ckpt_dir / wan_config.t5_tokenizer,
             shard_fn=None,
         )
         if self.model_config.get('text_encoder_fp8', False):
@@ -140,24 +191,23 @@ class WanPipeline(BasePipeline):
                     p.data = p.data.to(torch.float8_e4m3fn)
         self.text_encoder.model.requires_grad_(False)
 
+        vae_class = Wan2_2_VAE if model_type == 'ti2v' else Wan2_1_VAE
         # Same here, this isn't a nn.Module.
-        self.vae = Wan2_1_VAE(
-            vae_pth=os.path.join(ckpt_dir, wan_config.vae_checkpoint),
+        self.vae = vae_class(
+            vae_pth=ckpt_dir / wan_config.vae_checkpoint,
             device='cpu',
             dtype=dtype,
         )
         self.vae.model.to(dtype)
-        # These need to be on the device the VAE will be moved to during caching.
-        self.vae.mean = self.vae.mean.to('cuda')
-        self.vae.std = self.vae.std.to('cuda')
-        self.vae.scale = [self.vae.mean, 1.0 / self.vae.std]
+        # These tensors need to be on the device the VAE will be moved to during caching.
+        self.vae.scale = [entry.to('cuda') for entry in self.vae.scale]
 
-        if self.i2v or self.flf2v:
+        if model_type in ('i2v', 'flf2v'):
             self.clip = CLIPModel(
                 dtype=dtype,
                 device='cpu',
-                checkpoint_path=os.path.join(ckpt_dir, wan_config.clip_checkpoint),
-                tokenizer_path=os.path.join(ckpt_dir, wan_config.clip_tokenizer)
+                checkpoint_path=ckpt_dir / wan_config.clip_checkpoint,
+                tokenizer_path=ckpt_dir / wan_config.clip_tokenizer,
             )
 
     # delay loading transformer to save RAM
@@ -165,19 +215,18 @@ class WanPipeline(BasePipeline):
         dtype = self.model_config['dtype']
         transformer_dtype = self.model_config.get('transformer_dtype', dtype)
 
-        if transformer_path := self.model_config.get('transformer_path', None):
+        if self.transformer_path.is_file():
             self.transformer = WanModelFromSafetensors.from_pretrained(
-                transformer_path,
-                self.original_model_config_path,
+                self.transformer_path,
+                self.json_config,
                 torch_dtype=dtype,
                 transformer_dtype=transformer_dtype,
             )
         else:
-            ckpt_path = Path(self.model_config['ckpt_path'])
             with init_empty_weights():
-                self.transformer = WanModel.from_config(ckpt_path / 'config.json')
+                self.transformer = WanModel.from_config(self.json_config)
             state_dict = {}
-            for shard in ckpt_path.glob('*.safetensors'):
+            for shard in self.transformer_path.glob('*.safetensors'):
                 with safetensors.safe_open(shard, framework="pt", device="cpu") as f:
                     for key in f.keys():
                         state_dict[key] = f.get_tensor(key)
@@ -196,7 +245,7 @@ class WanPipeline(BasePipeline):
 
     def get_vae(self):
         vae = self.vae.model
-        clip = self.clip.model if self.i2v or self.flf2v else None
+        clip = self.clip.model if self.model_type in ('i2v', 'flf2v') else None
         return VaeAndClip(vae, clip)
 
     def get_text_encoders(self):
@@ -226,22 +275,20 @@ class WanPipeline(BasePipeline):
         )
 
     def get_call_vae_fn(self, vae_and_clip):
+        is_i2v = self.model_type in ('i2v', 'flf2v', 'i2v_v2')
         def fn(tensor):
             vae = vae_and_clip.vae
             p = next(vae.parameters())
             tensor = tensor.to(p.device, p.dtype)
             latents = vae_encode(tensor, self.vae)
             ret = {'latents': latents}
-            clip = vae_and_clip.clip
-            if clip is not None:
-                assert tensor.ndim == 5, f'i2v/flf2v must train on videos, got tensor with shape {tensor.shape}'
-                first_frame = tensor[:, :, 0:1, ...].clone()
-                clip_context = self.clip.visual(first_frame.to(p.device, p.dtype))
 
-                if self.flf2v:
-                    last_frame = tensor[:, :, -1:, ...].clone()
-                    # NOTE: dim=1 is a hack to pass clip_context without microbatching breaking the zeroth dim
-                    clip_context = torch.cat([clip_context, self.clip.visual(last_frame.to(p.device, p.dtype))], dim=1)
+            if is_i2v:
+                assert tensor.ndim == 5, f'i2v/flf2v must train on videos, got tensor with shape {tensor.shape}'
+                assert tensor.shape[2] > 1, 'i2v/flf2v must train on videos, but got an image'
+                first_frame = tensor[:, :, 0:1, ...].clone()
+
+                if self.model_type == 'flf2v':
                     tensor[:, :, 1:-1, ...] = 0
                 else:
                     tensor[:, :, 1:, ...] = 0
@@ -252,7 +299,16 @@ class WanPipeline(BasePipeline):
                 # the rest 0. But what happens if you do that? Probably things get fried, but might be worth testing.
                 y = vae_encode(tensor, self.vae)
                 ret['y'] = y
+
+            clip = vae_and_clip.clip
+            if clip is not None:
+                clip_context = self.clip.visual(first_frame.to(p.device, p.dtype))
+                if self.model_type == 'flf2v':
+                    last_frame = tensor[:, :, -1:, ...].clone()
+                    # NOTE: dim=1 is a hack to pass clip_context without microbatching breaking the zeroth dim
+                    clip_context = torch.cat([clip_context, self.clip.visual(last_frame.to(p.device, p.dtype))], dim=1)
                 ret['clip_context'] = clip_context
+
             return ret
         return fn
 
@@ -272,8 +328,9 @@ class WanPipeline(BasePipeline):
     def prepare_inputs(self, inputs, timestep_quantile=None):
         latents = inputs['latents'].float()
         mask = inputs['mask']
-        y = inputs['y'] if self.i2v or self.flf2v else None
-        clip_context = inputs['clip_context'] if self.i2v or self.flf2v else None
+        y = inputs['y'] if self.model_type in ('i2v', 'flf2v', 'i2v_v2') else None
+        # No CLIP for i2v_v2 (Wan2.2)
+        clip_context = inputs['clip_context'] if self.model_type in ('i2v', 'flf2v') else None
 
         if self.cache_text_embeddings:
             text_embeddings_or_ids = inputs['text_embeddings']
@@ -372,6 +429,7 @@ class InitialLayer(nn.Module):
         self.text_embedding = model.text_embedding
         self.time_projection = model.time_projection
         self.i2v = (model.model_type == 'i2v')
+        self.i2v_v2 = (model.model_type == 'i2v_v2')
         self.flf2v = (model.model_type == 'flf2v')
         if self.i2v or self.flf2v:
             self.img_emb = model.img_emb
@@ -407,7 +465,7 @@ class InitialLayer(nn.Module):
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
 
-        if self.i2v or self.flf2v:
+        if self.i2v or self.flf2v or self.i2v_v2:
             mask = torch.zeros((bs, 4, f, h, w), device=x.device, dtype=x.dtype)
             mask[:, :, 0, ...] = 1
             if self.flf2v:
@@ -428,11 +486,18 @@ class InitialLayer(nn.Module):
         ])
 
         # time embeddings
-        e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).to(x.device, torch.float32))
-        e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+        time_embed_seq_len = seq_len
+        if t.dim() == 1:
+            t = t.unsqueeze(-1)
+            time_embed_seq_len = 1  # will broadcast
+        bt = t.size(0)
+        t = t.flatten()
+        e = self.time_embedding(
+            sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, time_embed_seq_len)).to(x.device, torch.float32)
+        )
+        e0 = self.time_projection(e).unflatten(2, (6, self.dim))
 
         # context
-        context_lens = None
         context = self.text_embedding(
             torch.stack([
                 torch.cat(

@@ -98,3 +98,100 @@ t2v_1_3B.window_size = (-1, -1)
 t2v_1_3B.qk_norm = True
 t2v_1_3B.cross_attn_norm = True
 t2v_1_3B.eps = 1e-6
+
+#------------------------ Wan I2V A14B ------------------------#
+
+i2v_A14B = EasyDict(__name__='Config: Wan I2V A14B')
+i2v_A14B.update(wan_shared_cfg)
+
+i2v_A14B.t5_checkpoint = 'models_t5_umt5-xxl-enc-bf16.pth'
+i2v_A14B.t5_tokenizer = 'google/umt5-xxl'
+
+# vae
+i2v_A14B.vae_checkpoint = 'Wan2.1_VAE.pth'
+i2v_A14B.vae_stride = (4, 8, 8)
+
+# transformer
+i2v_A14B.patch_size = (1, 2, 2)
+i2v_A14B.dim = 5120
+i2v_A14B.ffn_dim = 13824
+i2v_A14B.freq_dim = 256
+i2v_A14B.num_heads = 40
+i2v_A14B.num_layers = 40
+i2v_A14B.window_size = (-1, -1)
+i2v_A14B.qk_norm = True
+i2v_A14B.cross_attn_norm = True
+i2v_A14B.eps = 1e-6
+i2v_A14B.low_noise_checkpoint = 'low_noise_model'
+i2v_A14B.high_noise_checkpoint = 'high_noise_model'
+
+# inference
+i2v_A14B.sample_shift = 5.0
+i2v_A14B.sample_steps = 40
+i2v_A14B.boundary = 0.900
+i2v_A14B.sample_guide_scale = (3.5, 3.5)  # low noise, high noise
+
+#------------------------ Wan T2V A14B ------------------------#
+
+t2v_A14B = EasyDict(__name__='Config: Wan T2V A14B')
+t2v_A14B.update(wan_shared_cfg)
+
+# t5
+t2v_A14B.t5_checkpoint = 'models_t5_umt5-xxl-enc-bf16.pth'
+t2v_A14B.t5_tokenizer = 'google/umt5-xxl'
+
+# vae
+t2v_A14B.vae_checkpoint = 'Wan2.1_VAE.pth'
+t2v_A14B.vae_stride = (4, 8, 8)
+
+# transformer
+t2v_A14B.patch_size = (1, 2, 2)
+t2v_A14B.dim = 5120
+t2v_A14B.ffn_dim = 13824
+t2v_A14B.freq_dim = 256
+t2v_A14B.num_heads = 40
+t2v_A14B.num_layers = 40
+t2v_A14B.window_size = (-1, -1)
+t2v_A14B.qk_norm = True
+t2v_A14B.cross_attn_norm = True
+t2v_A14B.eps = 1e-6
+t2v_A14B.low_noise_checkpoint = 'low_noise_model'
+t2v_A14B.high_noise_checkpoint = 'high_noise_model'
+
+# inference
+t2v_A14B.sample_shift = 12.0
+t2v_A14B.sample_steps = 40
+t2v_A14B.boundary = 0.875
+t2v_A14B.sample_guide_scale = (3.0, 4.0)  # low noise, high noise
+
+#------------------------ Wan TI2V 5B ------------------------#
+
+ti2v_5B = EasyDict(__name__='Config: Wan TI2V 5B')
+ti2v_5B.update(wan_shared_cfg)
+
+# t5
+ti2v_5B.t5_checkpoint = 'models_t5_umt5-xxl-enc-bf16.pth'
+ti2v_5B.t5_tokenizer = 'google/umt5-xxl'
+
+# vae
+ti2v_5B.vae_checkpoint = 'Wan2.2_VAE.pth'
+ti2v_5B.vae_stride = (4, 16, 16)
+
+# transformer
+ti2v_5B.patch_size = (1, 2, 2)
+ti2v_5B.dim = 3072
+ti2v_5B.ffn_dim = 14336
+ti2v_5B.freq_dim = 256
+ti2v_5B.num_heads = 24
+ti2v_5B.num_layers = 30
+ti2v_5B.window_size = (-1, -1)
+ti2v_5B.qk_norm = True
+ti2v_5B.cross_attn_norm = True
+ti2v_5B.eps = 1e-6
+
+# inference
+ti2v_5B.sample_fps = 24
+ti2v_5B.sample_shift = 5.0
+ti2v_5B.sample_steps = 50
+ti2v_5B.sample_guide_scale = 5.0
+ti2v_5B.frame_num = 121
