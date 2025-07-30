@@ -1,7 +1,7 @@
 # diffusion-pipe
 A pipeline parallel training script for diffusion models.
 
-Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2, OmniGen2, Flux Kontext.
+Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2, OmniGen2, Flux Kontext, Wan2.2.
 
 ## Features
 - Pipeline parallelism, for training models larger than can fit on a single GPU
@@ -13,6 +13,10 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - Easily add new models by implementing a single subclass
 
 ## Recent changes
+- 2025-07-29
+  - Support Wan2.2.
+    - The 5B is tested and fully validated on t2i training.
+    - All other models and modes (A14B, i2v, timestep ranges) are tested to confirm they run and that the loss looks reasonable, but proper learning hasn't been validated yet.
 - 2025-07-14
   - Merge dev branch into main. Lots of changes that aren't relevant for most users. Recommended to use ```--regenerate_cache``` (or delete the cache folders) after update.
       - If something breaks, please raise an issue and use the last known good commit in the meanwhile: ```git checkout 6940992455bb3bb2b88cd6e6c9463e7469929a70```
@@ -39,11 +43,6 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - 2025-04-19
   - Add support for first-frame-last-frame Wan model. Credit to @kabachuha for the PR.
   - Add wandb support. Credit to @ecarmen16 for the PR.
-- 2025-04-18
-  - Fix block swapping for HiDream. With ```blocks_to_swap = 24``` you can train rank 32 LoRA on a single 4090.
-  - Support nf4 quantization for HiDream. With nf4 transformer, you can train LoRA on a single 4090 even without block swapping. See supported models doc for how to enable.
-- 2025-04-15
-  - Support HiDream.
 
 ## Windows support
 It will be difficult or impossible to make training work on native Windows. This is because Deepspeed only has [partial Windows support](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/README.md). Deepspeed is a hard requirement because the entire training script is built around Deepspeed pipeline parallelism. However, it will work on Windows Subsystem for Linux, specifically WSL 2. If you must use Windows I recommend trying WSL 2.
