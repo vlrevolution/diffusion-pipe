@@ -11,7 +11,7 @@ from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
-from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift
+from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift, get_t_distribution, slice_t_distribution, sample_t
 from utils.offloading import ModelOffloader
 from .t5 import T5EncoderModel
 from .vae2_1 import Wan2_1_VAE
@@ -77,6 +77,7 @@ class WanPipeline(BasePipeline):
         self.model_config = self.config['model']
         self.offloader = ModelOffloader('dummy', [], 0, 0, True, torch.device('cuda'), False, debug=False)
         self.cache_text_embeddings = self.model_config.get('cache_text_embeddings', True)
+        self.t_dist = get_t_distribution(self.model_config).to('cuda')
 
         # The official Wan top-level checkpoint folder. Must exist.
         ckpt_dir = Path(self.model_config['ckpt_path'])
@@ -345,30 +346,16 @@ class WanPipeline(BasePipeline):
             mask = F.interpolate(mask, size=(h, w), mode='nearest-exact')  # resize to latent spatial dimension
             mask = mask.unsqueeze(2)  # make mask same number of dims as target
 
-        timestep_sample_method = self.model_config.get('timestep_sample_method', 'logit_normal')
-
-        if timestep_sample_method == 'logit_normal':
-            dist = torch.distributions.normal.Normal(0, 1)
-        elif timestep_sample_method == 'uniform':
-            dist = torch.distributions.uniform.Uniform(0, 1)
-        else:
-            raise NotImplementedError()
-
-        if timestep_quantile is not None:
-            t = dist.icdf(torch.full((bs,), timestep_quantile, device=latents.device))
-        else:
-            t = dist.sample((bs,)).to(latents.device)
-
-        if timestep_sample_method == 'logit_normal':
-            sigmoid_scale = self.model_config.get('sigmoid_scale', 1.0)
-            t = t * sigmoid_scale
-            t = torch.sigmoid(t)
+        t = self.t_dist
 
         if shift := self.model_config.get('shift', None):
             t = (t * shift) / (1 + (shift - 1) * t)
         elif self.model_config.get('flux_shift', False):
             mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
             t = time_shift(mu, 1.0, t)
+
+        t = slice_t_distribution(t, min_t=self.model_config.get('min_t', 0.0), max_t=self.model_config.get('max_t', 1.0))
+        t = sample_t(t, bs, quantile=timestep_quantile).to(latents.device)
 
         x_1 = latents
         x_0 = torch.randn_like(x_1)

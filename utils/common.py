@@ -84,3 +84,42 @@ def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: flo
     m = (y2 - y1) / (x2 - x1)
     b = y1 - m * x1
     return lambda x: m * x + b
+
+
+def get_t_distribution(model_config):
+    timestep_sample_method = model_config.get('timestep_sample_method', 'logit_normal')
+
+    if timestep_sample_method == 'logit_normal':
+        dist = torch.distributions.normal.Normal(0, 1)
+    elif timestep_sample_method == 'uniform':
+        dist = torch.distributions.uniform.Uniform(0, 1)
+    else:
+        raise NotImplementedError()
+
+    n_buckets = 10_000
+    delta = 1 / n_buckets
+    min_quantile = delta
+    max_quantile = 1 - delta
+    quantiles = torch.linspace(min_quantile, max_quantile, n_buckets)
+    t = dist.icdf(quantiles)
+
+    if timestep_sample_method == 'logit_normal':
+        sigmoid_scale = model_config.get('sigmoid_scale', 1.0)
+        t = t * sigmoid_scale
+        t = torch.sigmoid(t)
+
+    return t
+
+
+def slice_t_distribution(t, min_t=0.0, max_t=1.0):
+    start = torch.searchsorted(t, min_t).item()
+    end = torch.searchsorted(t, max_t).item()
+    return t[start:end]
+
+
+def sample_t(t, batch_size, quantile=None):
+    if quantile is not None:
+        i = (torch.full((batch_size,), quantile) * len(t)).to(torch.int32)
+    else:
+        i = torch.randint(0, len(t), size=(batch_size,))
+    return t[i]
