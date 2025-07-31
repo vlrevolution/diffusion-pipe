@@ -754,7 +754,7 @@ class DirectoryDataset:
             empty_caption_ds,
             map_fn,
             cache_dir=self.cache_dir,
-            cache_file_prefix='uncond_text_embeddings_',
+            cache_file_prefix=f'uncond_text_embeddings_{i}_',
             regenerate_cache=regenerate_cache,
         )
         for size_bucket_ds in self.get_size_bucket_datasets():
