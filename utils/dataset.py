@@ -65,6 +65,13 @@ def bucket_suffix(key):
         raise RuntimeError(f'Unexpected bucket: {key}')
 
 
+def dedup_and_sort(values):
+    values = set(round(x, ROUND_DECIMAL_DIGITS) for x in values)
+    values = list(values)
+    values.sort()
+    return np.array(values)
+
+
 def _map_and_cache(dataset, map_fn, cache_dir, cache_file_prefix='', new_fingerprint_args=None, regenerate_cache=False, caching_batch_size=1):
     # TODO: remove. Currently using this to avoid recaching everything.
     # cache_arrow_files = list(str(path) for path in cache_dir.glob(f'{cache_file_prefix}*.arrow'))
@@ -306,7 +313,7 @@ class ARBucketDataset:
             metadata_with_size_bucket = self.metadata_dataset.map(
                 lambda example: {'size_bucket': size_bucket},
                 cache_file_name=str(self.cache_dir / 'metadata/metadata_with_size_bucket.arrow'),
-                load_from_cache_file=(not regenerate_cache),
+                load_from_cache_file=(not regenerate_cache and trust_cache),
                 desc='Adding size bucket',
             )
             # to make sure the directory has a unique name
@@ -347,6 +354,7 @@ class DirectoryDataset:
             self.resolutions = self._process_user_provided_resolutions(
                 directory_config.get('resolutions', dataset_config['resolutions'])
             )
+            self.resolutions = dedup_and_sort(self.resolutions)
             self.ar_bucket_datasets = []
         self.shuffle = directory_config.get('cache_shuffle_num', dataset_config.get('cache_shuffle_num', 0))
         self.directory_config['cache_shuffle_num'] = self.shuffle # Make accessible if it wasn't yet, for picking one out
@@ -379,6 +387,7 @@ class DirectoryDataset:
             max_ar = self.directory_config.get('max_ar', self.dataset_config['max_ar'])
             num_ar_buckets = self.directory_config.get('num_ar_buckets', self.dataset_config['num_ar_buckets'])
             self.ars = np.geomspace(min_ar, max_ar, num=num_ar_buckets)
+        self.ars = dedup_and_sort(self.ars)
         self.log_ars = np.log(self.ars)
         frame_buckets = self.directory_config.get('frame_buckets', self.dataset_config.get('frame_buckets', [1]))
         if 1 not in frame_buckets:
@@ -556,7 +565,7 @@ class DirectoryDataset:
                 metadata_dataset = metadata_dataset.map(
                     add_captions,
                     cache_file_name=str(self.cache_dir / 'metadata/metadata_with_captions.arrow'),
-                    load_from_cache_file=(not regenerate_cache),
+                    load_from_cache_file=(not regenerate_cache and trust_cache),
                     desc='Adding captions',
                 )
                 del caption_data
@@ -723,25 +732,21 @@ class DirectoryDataset:
         return size_bucket
 
     def _process_user_provided_ars(self, ars):
-        ar_buckets = set()
+        ar_buckets = []
         for ar in ars:
             if isinstance(ar, (tuple, list)):
                 assert len(ar) == 2
-                ar = round(ar[0] / ar[1], ROUND_DECIMAL_DIGITS)
-            ar_buckets.add(ar)
-        ar_buckets = list(ar_buckets)
-        ar_buckets.sort()
-        return np.array(ar_buckets)
+                ar = ar[0] / ar[1]
+            ar_buckets.append(ar)
+        return ar_buckets
 
     def _process_user_provided_resolutions(self, resolutions):
-        result = set()
+        result = []
         for res in resolutions:
             if isinstance(res, (tuple, list)):
                 assert len(res) == 2
-                res = round(math.sqrt(res[0] * res[1]), ROUND_DECIMAL_DIGITS)
-            result.add(res)
-        result = list(result)
-        result.sort()
+                res = math.sqrt(res[0] * res[1])
+            result.append(res)
         return result
 
     def get_size_bucket_datasets(self):
