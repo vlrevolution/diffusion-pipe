@@ -27,6 +27,7 @@ DEBUG = False
 IMAGE_SIZE_ROUND_TO_MULTIPLE = 32
 NUM_PROC = min(8, os.cpu_count())
 CAPTIONS_JSON_FILE = 'captions.json'
+ROUND_DECIMAL_DIGITS = 3
 
 UNCOND_FRACTION = 0.0
 
@@ -52,9 +53,14 @@ def shuffle_captions(captions: list[str], count: int = 0, delimiter: str = ', ',
 
 def bucket_suffix(key):
     if len(key) == 2:
-        return f'{key[0]:.3f}_{key[1]}'
+        # AR, frames
+        return f'{key[0]:.{ROUND_DECIMAL_DIGITS}f}_{key[1]}'
     elif len(key) == 3:
+        # width, height, frames
         return f'{key[0]}x{key[1]}x{key[2]}'
+    elif len(key) == 4:
+        # AR, width, height, frames
+        return f'{key[0]:.{ROUND_DECIMAL_DIGITS}f}x{key[1]}x{key[2]}x{key[3]}'
     else:
         raise RuntimeError(f'Unexpected bucket: {key}')
 
@@ -147,6 +153,13 @@ class SizeBucketDataset:
         self.model_name = model_name
         self.path = Path(self.directory_config['path'])
         self.cache_dir = self.path / 'cache' / self.model_name / f'cache_{bucket_suffix(size_bucket)}'
+
+        if len(size_bucket) == 4:
+            # rename old folder name to the new one for convenience
+            old_cache_dir = self.path / 'cache' / self.model_name / f'cache_{bucket_suffix(size_bucket[1:])}'
+            if old_cache_dir.exists() and not self.cache_dir.exists():
+                old_cache_dir.rename(self.cache_dir)
+
         os.makedirs(self.cache_dir, exist_ok=True)
         self.text_embedding_datasets = []
         self.uncond_text_embeddings = []
@@ -296,8 +309,10 @@ class ARBucketDataset:
                 load_from_cache_file=(not regenerate_cache),
                 desc='Adding size bucket',
             )
+            # to make sure the directory has a unique name
+            naming_size_bucket = (self.ar_frames[0],) + size_bucket
             self.size_buckets.append(
-                SizeBucketDataset(metadata_with_size_bucket, self.directory_config, size_bucket, self.model_name)
+                SizeBucketDataset(metadata_with_size_bucket, self.directory_config, naming_size_bucket, self.model_name)
             )
 
         for ds in self.size_buckets:
@@ -712,7 +727,7 @@ class DirectoryDataset:
         for ar in ars:
             if isinstance(ar, (tuple, list)):
                 assert len(ar) == 2
-                ar = round(ar[0] / ar[1], 6)
+                ar = round(ar[0] / ar[1], ROUND_DECIMAL_DIGITS)
             ar_buckets.add(ar)
         ar_buckets = list(ar_buckets)
         ar_buckets.sort()
@@ -723,7 +738,7 @@ class DirectoryDataset:
         for res in resolutions:
             if isinstance(res, (tuple, list)):
                 assert len(res) == 2
-                res = round(math.sqrt(res[0] * res[1]), 6)
+                res = round(math.sqrt(res[0] * res[1]), ROUND_DECIMAL_DIGITS)
             result.add(res)
         result = list(result)
         result.sort()
