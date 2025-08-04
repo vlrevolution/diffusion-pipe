@@ -63,9 +63,13 @@ def load_safetensors(path):
 def load_state_dict(path):
     path = str(path)
     if path.endswith('.safetensors'):
-        return load_safetensors(path)
+        sd = load_safetensors(path)
     else:
-        return torch.load(path, weights_only=True)
+        sd = torch.load(path, weights_only=True)
+    for key in sd:
+        if key.endswith('scale_input') or key.endswith('scale_weight'):
+            raise ValueError('fp8_scaled weights are not supported. Please use bf16 or normal fp8 weights.')
+    return sd
 
 
 def round_to_nearest_multiple(x, multiple):

@@ -11,7 +11,7 @@ from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
-from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift, get_t_distribution, slice_t_distribution, sample_t
+from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift, get_t_distribution, slice_t_distribution, sample_t, load_state_dict
 from utils.offloading import ModelOffloader
 from .t5 import T5EncoderModel
 from .vae2_1 import Wan2_1_VAE
@@ -21,8 +21,6 @@ from .model import (
 )
 from .clip import CLIPModel
 from . import configs as wan_configs
-
-from safetensors.torch import load_file
 
 KEEP_IN_HIGH_PRECISION = ['norm', 'bias', 'patch_embedding', 'text_embedding', 'time_embedding', 'time_projection', 'head', 'modulation']
 
@@ -42,7 +40,7 @@ class WanModelFromSafetensors(WanModel):
         with init_empty_weights():
             model = cls(**config)
 
-        state_dict = load_file(weights_file, device='cpu')
+        state_dict = load_state_dict(weights_file)
         state_dict = {
             re.sub(r'^model\.diffusion_model\.', '', k): v for k, v in state_dict.items()
         }
