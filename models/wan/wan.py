@@ -270,9 +270,6 @@ class WanPipeline(BasePipeline):
             self.config,
             support_video=True,
             framerate=self.framerate,
-            round_height=8,
-            round_width=8,
-            round_frames=4,
         )
 
     def get_call_vae_fn(self, vae_and_clip):

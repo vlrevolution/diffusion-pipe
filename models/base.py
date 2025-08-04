@@ -59,7 +59,7 @@ def convert_crop_and_resize(pil_img, width_and_height):
 
 
 class PreprocessMediaFile:
-    def __init__(self, config, support_video=False, framerate=None, round_height=1, round_width=1, round_frames=1):
+    def __init__(self, config, support_video=False, framerate=None, round_height=16, round_width=16, round_frames=4):
         self.config = config
         self.video_clip_mode = config.get('video_clip_mode', 'single_beginning')
         print(f'using video_clip_mode={self.video_clip_mode}')
