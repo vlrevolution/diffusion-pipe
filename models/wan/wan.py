@@ -266,10 +266,16 @@ class WanPipeline(BasePipeline):
         safetensors.torch.save_file(state_dict, save_dir / 'model.safetensors', metadata={'format': 'pt'})
 
     def get_preprocess_media_file_fn(self):
+        if self.model_type == 'ti2v':
+            round_side = 32
+        else:
+            round_side = 16
         return PreprocessMediaFile(
             self.config,
             support_video=True,
             framerate=self.framerate,
+            round_height=round_side,
+            round_width=round_side,
         )
 
     def get_call_vae_fn(self, vae_and_clip):
