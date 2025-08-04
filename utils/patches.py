@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), '../
 
 import torch
 from torch import nn
+import torch._inductor.runtime.triton_heuristics
 import peft
 from peft.tuners._buffer_dict import BufferDict
 from transformers import CLIPTextModel, AutoModel
