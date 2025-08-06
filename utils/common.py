@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import gc
 import time
 import math
+from pathlib import Path
 
 import torch
 import deepspeed.comm.comm as dist
@@ -70,6 +71,22 @@ def load_state_dict(path):
         if key.endswith('scale_input') or key.endswith('scale_weight'):
             raise ValueError('fp8_scaled weights are not supported. Please use bf16 or normal fp8 weights.')
     return sd
+
+
+def iterate_safetensors(path):
+    path = Path(path)
+    if path.is_dir():
+        safetensors_files = list(path.glob('*.safetensors'))
+        if len(safetensors_files) == 0:
+            raise FileNotFoundError(f'Cound not find safetensors files in directory {path}')
+    else:
+        if path.suffix != '.safetensors':
+            raise ValueError(f'Expected {path} to be a safetensors file')
+        safetensors_files = [path]
+    for filename in safetensors_files:
+        with safe_open(str(filename), framework="pt", device="cpu") as f:
+            for key in f.keys():
+                yield key, f.get_tensor(key)
 
 
 def round_to_nearest_multiple(x, multiple):

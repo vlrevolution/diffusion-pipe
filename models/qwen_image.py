@@ -11,9 +11,10 @@ from diffusers.models.attention_processor import Attention
 import safetensors
 from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
+import transformers
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
-from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift
+from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift, iterate_safetensors
 from utils.offloading import ModelOffloader
 
 
@@ -181,7 +182,43 @@ class QwenImagePipeline(BasePipeline):
         self.model_config = self.config['model']
         self.offloader = ModelOffloader('dummy', [], 0, 0, True, torch.device('cuda'), False, debug=False)
         dtype = self.model_config['dtype']
-        self.diffusers_pipeline = diffusers.QwenImagePipeline.from_pretrained(self.model_config['diffusers_path'], transformer=None, torch_dtype=dtype)
+
+        tokenizer = transformers.Qwen2Tokenizer.from_pretrained('configs/qwen_image/tokenizer', local_files_only=True)
+
+        if 'text_encoder_path' in self.model_config:
+            text_encoder_path = self.model_config['text_encoder_path']
+        else:
+            text_encoder_path = Path(self.model_config['diffusers_path']) / 'text_encoder'
+        text_encoder_config = transformers.Qwen2_5_VLConfig.from_pretrained('configs/qwen_image/text_encoder', local_files_only=True)
+        with init_empty_weights():
+            text_encoder = transformers.Qwen2_5_VLForConditionalGeneration(text_encoder_config)
+        for key, tensor in iterate_safetensors(text_encoder_path):
+            # The keys in the state_dict don't match the structure in the model. Annoying. Need to convert.
+            key = key.replace('model.', 'language_model.')
+            key = 'model.' + key
+            if 'lm_head' in key:
+                key = 'lm_head.weight'
+            set_module_tensor_to_device(text_encoder, key, device='cpu', dtype=dtype, value=tensor)
+
+        # TODO: make this work with ComfyUI VAE weights, which have completely different key names.
+        if 'vae_path' in self.model_config:
+            vae_path = self.model_config['vae_path']
+        else:
+            vae_path = Path(self.model_config['diffusers_path']) / 'vae'
+        with open('configs/qwen_image/vae/config.json') as f:
+            vae_config = json.load(f)
+        with init_empty_weights():
+            vae = diffusers.AutoencoderKLQwenImage.from_config(vae_config)
+        for key, tensor in iterate_safetensors(vae_path):
+            set_module_tensor_to_device(vae, key, device='cpu', dtype=dtype, value=tensor)
+
+        self.diffusers_pipeline = diffusers.QwenImagePipeline(
+            scheduler=None,
+            vae=vae,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            transformer=None,
+        )
 
         latents_mean = (
             torch.tensor(self.vae.config.latents_mean)
@@ -196,19 +233,19 @@ class QwenImagePipeline(BasePipeline):
         dtype = self.model_config['dtype']
         transformer_dtype = self.model_config.get('transformer_dtype', dtype)
 
-        transformer_path = Path(self.model_config['diffusers_path']) / 'transformer'
-        with open(transformer_path / 'config.json') as f:
+        if 'transformer_path' in self.model_config:
+            transformer_path = self.model_config['transformer_path']
+        else:
+            transformer_path = Path(self.model_config['diffusers_path']) / 'transformer'
+        with open('configs/qwen_image/transformer/config.json') as f:
             json_config = json.load(f)
 
         with init_empty_weights():
             transformer = diffusers.QwenImageTransformer2DModel.from_config(json_config)
 
-        for shard in transformer_path.glob('*.safetensors'):
-            with safetensors.safe_open(shard, framework="pt", device="cpu") as f:
-                for key in f.keys():
-                    tensor = f.get_tensor(key)
-                    dtype_to_use = dtype if any(keyword in key for keyword in KEEP_IN_HIGH_PRECISION) or tensor.ndim == 1 else transformer_dtype
-                    set_module_tensor_to_device(transformer, key, device='cpu', dtype=dtype_to_use, value=tensor)
+        for key, tensor in iterate_safetensors(transformer_path):
+            dtype_to_use = dtype if any(keyword in key for keyword in KEEP_IN_HIGH_PRECISION) or tensor.ndim == 1 else transformer_dtype
+            set_module_tensor_to_device(transformer, key, device='cpu', dtype=dtype_to_use, value=tensor)
 
         for block in transformer.transformer_blocks:
             block.attn.set_processor(QwenDoubleStreamAttnProcessor2_0())
