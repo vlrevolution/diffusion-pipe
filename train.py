@@ -329,6 +329,9 @@ if __name__ == '__main__':
     elif model_type == 'omnigen2':
         from models import omnigen2
         model = omnigen2.OmniGen2Pipeline(config)
+    elif model_type == 'qwen_image':
+        from models import qwen_image
+        model = qwen_image.QwenImagePipeline(config)
     else:
         raise NotImplementedError(f'Model type {model_type} is not implemented')
 
