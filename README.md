@@ -1,7 +1,7 @@
 # diffusion-pipe
 A pipeline parallel training script for diffusion models.
 
-Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2, OmniGen2, Flux Kontext, Wan2.2.
+Models supported: SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Image 2.0, Wan2.1 (t2v and i2v), Chroma, HiDream, Stable Diffusion 3, Cosmos-Predict2, OmniGen2, Flux Kontext, Wan2.2, Qwen-Image.
 
 ## Features
 - Pipeline parallelism, for training models larger than can fit on a single GPU
@@ -13,6 +13,9 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
 - Easily add new models by implementing a single subclass
 
 ## Recent changes
+- 2025-08-06
+  - Support Qwen-Image.
+  - Slight speed improvement to Automagic optimizer.
 - 2025-07-29
   - Support Wan2.2.
     - The 5B is tested and fully validated on t2i training.
@@ -40,9 +43,6 @@ Currently supports SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Ima
   - Support multiple shuffling of tags when caching text embeddings. Credit to @gitmylo for the PR.
 - 2025-05-07
   - Switch to official implementation of LTX-Video. Allows training the 13b LTX-Video model.
-- 2025-04-19
-  - Add support for first-frame-last-frame Wan model. Credit to @kabachuha for the PR.
-  - Add wandb support. Credit to @ecarmen16 for the PR.
 
 ## Windows support
 It will be difficult or impossible to make training work on native Windows. This is because Deepspeed only has [partial Windows support](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/README.md). Deepspeed is a hard requirement because the entire training script is built around Deepspeed pipeline parallelism. However, it will work on Windows Subsystem for Linux, specifically WSL 2. If you must use Windows I recommend trying WSL 2.

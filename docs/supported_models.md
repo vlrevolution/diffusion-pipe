@@ -16,6 +16,7 @@
 |OmniGen2        |✅    |❌              |❌                |
 |Flux Kontext    |✅    |✅              |✅                |
 |Wan2.2          |✅    |✅              |✅                |
+|Qwen-Image      |✅    |✅              |✅                |
 
 
 ## SDXL
@@ -341,3 +342,31 @@ max_t = 1
 Controlling the timestep range like this will work correctly even if you are using the ```shift``` or ```flux_shift``` parameters to shift the timestep distribution.
 
 Alternatively, people have noticed that the low noise model can be used entirely on its own. So you could just train the low noise model without restricting the timestep range, just like you would do with Wan2.1.
+
+## Qwen-Image
+```
+[model]
+type = 'qwen_image'
+diffusers_path = '/data/imagegen_models/Qwen-Image'
+dtype = 'bfloat16'
+transformer_dtype = 'float8'
+timestep_sample_method = 'logit_normal'
+```
+Or load from individual files:
+```
+[model]
+type = 'qwen_image'
+transformer_path = '/data/imagegen_models/comfyui-models/qwen_image_bf16.safetensors'
+text_encoder_path = '/data/imagegen_models/comfyui-models/qwen_2.5_vl_7b.safetensors'
+vae_path = '/data/imagegen_models/Qwen-Image/vae/diffusion_pytorch_model.safetensors'
+dtype = 'bfloat16'
+transformer_dtype = 'float8'
+timestep_sample_method = 'logit_normal'
+```
+In the second format, ```transformer_path``` and ```text_encoder_path``` should be the ComfyUI files, but ```vae_path``` needs to be the **Diffusers VAE** (the weight key names are completely different and the ComfyUI VAE isn't currently supported). You should use bf16 files even if you are casting the transformer to float8; fp8_scaled weights won't work at all, and fp8 weights might have slightly lower quality because the training script tries to keep some weights in higher precision. If you give both ```diffusers_path``` and the individual model paths, it will prefer to read the sub-model from the individual path.
+
+### Training LoRAs on a single 24GB GPU
+- You will need block swapping. See the [example 24GB VRAM config](../examples/qwen_image_24gb_vram.toml) which has everything set correctly.
+- Use the expandable segments CUDA feature: ```PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1" deepspeed --num_gpus=1 train.py --deepspeed --config /home/anon/code/diffusion-pipe-configs/tmp.toml```
+- Use a dataset resolution of 640. This is one of the resolutions the model was trained with and might work a bit better than 512.
+- If you use higher LoRA rank or higher resolution, you might need to increase blocks_to_swap.
