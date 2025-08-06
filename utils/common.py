@@ -86,6 +86,8 @@ def iterate_safetensors(path):
     for filename in safetensors_files:
         with safe_open(str(filename), framework="pt", device="cpu") as f:
             for key in f.keys():
+                if key.endswith('scale_input') or key.endswith('scale_weight'):
+                    raise ValueError('fp8_scaled weights are not supported. Please use bf16 or normal fp8 weights.')
                 yield key, f.get_tensor(key)
 
 
