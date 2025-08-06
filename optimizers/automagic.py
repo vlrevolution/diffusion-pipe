@@ -70,13 +70,13 @@ class Automagic(torch.optim.Optimizer):
         self.is_stochastic_rounding_accumulation = False
 
         # setup stochastic grad accum hooks
-        for group in self.param_groups:
-            for param in group['params']:
-                if param.requires_grad and param.dtype != torch.float32:
-                    self.is_stochastic_rounding_accumulation = True
-                    param.register_post_accumulate_grad_hook(
-                        stochastic_grad_accummulation
-                    )
+        # for group in self.param_groups:
+        #     for param in group['params']:
+        #         if param.requires_grad and param.dtype != torch.float32:
+        #             self.is_stochastic_rounding_accumulation = True
+        #             param.register_post_accumulate_grad_hook(
+        #                 stochastic_grad_accummulation
+        #             )
 
         self.do_paramiter_swapping = do_paramiter_swapping
         self.paramiter_swapping_factor = paramiter_swapping_factor
@@ -302,7 +302,6 @@ class Automagic(torch.optim.Optimizer):
                     # Instead of using add_ with a tensor alpha (which isn't supported),
                     # we'll use element-wise multiplication to apply the weight decay
                     weight_decay_update = p_data_fp32 * (-group["weight_decay"]) * new_lr
-                    p_data_fp32.add_(weight_decay_update)
                 else:
                     weight_decay_update = None
 
@@ -318,6 +317,8 @@ class Automagic(torch.optim.Optimizer):
                     p.add_(shift)
                     shift.add_(grad.sub_(p))
                 else:
+                    if weight_decay_update is not None:
+                        p_data_fp32.add_(weight_decay_update)
                     p_data_fp32.add_(-update)
                     if p.dtype != torch.float32:
                         # apply stochastic rounding
