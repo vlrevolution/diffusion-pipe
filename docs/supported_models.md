@@ -371,6 +371,8 @@ pip uninstall diffusers
 pip install git+https://github.com/huggingface/diffusers
 ```
 
+Qwen-Image LoRAs are saved in ComfyUI format.
+
 ### Training LoRAs on a single 24GB GPU
 - You will need block swapping. See the [example 24GB VRAM config](../examples/qwen_image_24gb_vram.toml) which has everything set correctly.
 - Use the expandable segments CUDA feature: ```PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1" deepspeed --num_gpus=1 train.py --deepspeed --config /home/anon/code/diffusion-pipe-configs/tmp.toml```
