@@ -342,12 +342,13 @@ class QwenImagePipeline(BasePipeline):
         bs, channels, num_frames, h, w = latents.shape
 
         num_channels_latents = self.transformer.config.in_channels // 4
+        assert num_channels_latents == channels
         latents = self._pack_latents(latents, bs, num_channels_latents, h, w)
 
         if mask is not None:
-            mask = mask.unsqueeze(1)  # make mask (bs, 1, img_h, img_w)
+            mask = mask.unsqueeze(1).expand((-1, num_channels_latents, -1, -1))  # make mask (bs, c, img_h, img_w)
             mask = F.interpolate(mask, size=(h, w), mode='nearest-exact')  # resize to latent spatial dimension
-            mask = mask.unsqueeze(2)  # make mask same number of dims as target
+            mask = mask.unsqueeze(2)  # add frame dimension
             mask = self._pack_latents(mask, bs, num_channels_latents, h, w)
 
         timestep_sample_method = self.model_config.get('timestep_sample_method', 'logit_normal')
