@@ -384,6 +384,9 @@ class QwenImagePipeline(BasePipeline):
         img_shapes = torch.tensor([(1, h // 2, w // 2)], dtype=torch.int32, device=device).repeat((bs, 1))
         img_attention_mask = torch.ones((bs, x_t.shape[1]), dtype=torch.bool, device=device)
         attention_mask = torch.cat([prompt_embeds_mask, img_attention_mask], dim=1)
+        # Make broadcastable with attention weights, which are [bs, num_heads, query_len, key_value_len]
+        attention_mask = attention_mask.view(bs, 1, 1, -1)
+        assert attention_mask.dtype == torch.bool
 
         return (
             (x_t, prompt_embeds, attention_mask, t, img_shapes),
