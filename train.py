@@ -768,10 +768,11 @@ if __name__ == '__main__':
             if optimizer.__class__.__name__ == 'Prodigy':
                 prodigy_d = get_prodigy_d(optimizer)
                 tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, step)
-            if optimizer.__class__.__name__ == 'Automagic':
+            if optimizer.__class__.__name__ in ('Automagic', 'GenericOptim'):
                 lrs, avg_lr = _get_automagic_lrs(optimizer)
-                tb_writer.add_histogram(f'train/automagic_lrs', lrs, step)
-                tb_writer.add_scalar(f'train/automagic_avg_lr', avg_lr, step)
+                if avg_lr > 0:
+                    tb_writer.add_histogram(f'train/automagic_lrs', lrs, step)
+                    tb_writer.add_scalar(f'train/automagic_avg_lr', avg_lr, step)
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
             evaluate(model, model_engine, eval_dataloaders, tb_writer, step, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
