@@ -307,9 +307,16 @@ class GenericOptim(Optimizer):
                 if "step" not in state:
                     state["step"] = 0
                 state["step"] += 1
-                step_size = 1.0
                 cpu_offload = group['cpu_offload'] if p.ndim >= 2 else False
                 state_device = 'cpu' if cpu_offload else p.device
+
+                # learning rate
+                if group['automagic']:
+                    automagic_lr = self.update_automagic_lr(group, state, p.grad, state_device)
+                    step_size = 1.0
+                else:
+                    automagic_lr = None
+                    step_size = group['lr']
 
                 # get momentum
                 numerator = self.get_numerator(group, state, p, state_device)
@@ -352,12 +359,8 @@ class GenericOptim(Optimizer):
                         bias_correction2 = 1.0 - beta2 ** state["step"]
                         step_size = step_size * math.sqrt(bias_correction2) / bias_correction1
 
-                # learning rate
-                if group['automagic']:
-                    automagic_lr = self.update_automagic_lr(group, state, p.grad, state_device)
+                if automagic_lr is not None:
                     numerator.mul_(automagic_lr)
-                else:
-                    step_size *= group['lr']
 
                 update = torch.zeros_like(p)
 
@@ -464,8 +467,14 @@ class GenericOptim(Optimizer):
             state['automagic_lr'] = torch.full_like(update, group['lr_bump'])
             state['avg_lr'] = torch.mean(state['automagic_lr'])
         automagic_lr = state['automagic_lr'].to(update.device, non_blocking=True)
-        # We use the sign bit as the last polarity because lr must be positive.
-        last_polarity = automagic_lr > 0
+        if 'exp_avg' in state:
+            # Use momentum for last_polarity.
+            exp_avg = state['exp_avg'].to(update.device, non_blocking=True)  # may be offloaded
+            state['exp_avg'] = exp_avg  # slight optimization for future code if we moved it to GPU
+            last_polarity = exp_avg > 0
+        else:
+            # We use the sign bit as the last polarity because lr must be positive.
+            last_polarity = automagic_lr > 0
         automagic_lr = automagic_lr.abs()
         current_polarity = update > 0
         lr_bump = group['lr_bump']
