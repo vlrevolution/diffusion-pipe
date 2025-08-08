@@ -251,7 +251,7 @@ class GenericOptim(Optimizer):
         self.momentum_type = momentum_type
         assert self.momentum_type in ["ema", "sm", "none"]
         self.second_moment_type = second_moment_type
-        assert self.second_moment_type in ["ema", "none", "sn"]
+        assert self.second_moment_type in ["ema", "none", "sn", "factored"]
 
         require_version("torch>=1.5.0")  # add_ with alpha
         if lr < 0.0:
@@ -364,7 +364,7 @@ class GenericOptim(Optimizer):
                 # step
                 if denominator is None:  # no adaptive step size
                     update.add_(numerator, alpha=-step_size)
-                elif self.second_moment_type == "ema":  # standard adam
+                elif self.second_moment_type in ('ema', 'factored'):  # standard adam
                     update.addcdiv_(numerator, denominator, value=-step_size)
                 elif self.second_moment_type == "sn":  # subset norm requires broadcast division
                     if "subset_size" in group and group["subset_size"] != "heuristics":
@@ -427,9 +427,12 @@ class GenericOptim(Optimizer):
 
     def get_denominator(self, group, state, grad, state_device):
         beta1, beta2 = group["betas"]
-        if beta2 == 0 or self.second_moment_type == "none":
+        second_moment_type = self.second_moment_type
+        if second_moment_type == 'factored' and grad.ndim == 1:
+            second_moment_type = 'ema'
+        if beta2 == 0 or second_moment_type == "none":
             return None  # this means only use base lr
-        elif self.second_moment_type == "ema":  # Adam style
+        elif second_moment_type == "ema":  # Adam style
             if "exp_avg_sq" not in state:  # initialization
                 state["exp_avg_sq"] = torch.zeros_like(grad)
             exp_avg_sq = state["exp_avg_sq"].to(grad.device, non_blocking=True)
@@ -439,10 +442,22 @@ class GenericOptim(Optimizer):
                 exp_avg_sq.add_(grad**2)
             state['exp_avg_sq'] = exp_avg_sq.to(state_device)
             return exp_avg_sq.sqrt().add_(group["eps"])
-        elif self.second_moment_type == "sn":
+        elif second_moment_type == "sn":
             return get_and_update_subset_norm_denom(group, state, grad, beta2)
+        elif second_moment_type == 'factored':
+            if 'exp_avg_sq_row' not in state:
+                state['exp_avg_sq_row'] = torch.zeros(grad.shape[:-1], dtype=grad.dtype, device=grad.device)
+                state['exp_avg_sq_col'] = torch.zeros(grad.shape[:-2] + grad.shape[-1:], dtype=grad.dtype, device=grad.device)
+            exp_avg_sq_row = state['exp_avg_sq_row']
+            exp_avg_sq_col = state['exp_avg_sq_col']
+            grad_sq = grad**2
+            exp_avg_sq_row.mul_(beta2).add_(grad_sq.mean(dim=-1), alpha=(1.0 - beta2))
+            exp_avg_sq_col.mul_(beta2).add_(grad_sq.mean(dim=-2), alpha=(1.0 - beta2))
+            r_factor = (exp_avg_sq_row / exp_avg_sq_row.mean(dim=-1, keepdim=True)).unsqueeze(-1)
+            c_factor = exp_avg_sq_col.unsqueeze(-2)
+            return torch.mul(r_factor, c_factor).sqrt_().add_(group['eps'])
         else:
-            raise ValueError(f"Unrecognized second moment (adaptive step size) type {self.second_moment_type}.")
+            raise ValueError(f"Unrecognized second moment (adaptive step size) type {second_moment_type}.")
 
     def update_automagic_lr(self, group, state, update, state_device):
         if 'automagic_lr' not in state:
