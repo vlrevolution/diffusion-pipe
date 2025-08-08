@@ -13,6 +13,8 @@ Models supported: SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Imag
 - Easily add new models by implementing a single subclass
 
 ## Recent changes
+- 2025-08-07
+  - Fix Flux training error caused by a breaking change in Diffusers. Make sure to update requirements.
 - 2025-08-06
   - Support Qwen-Image.
   - Slight speed improvement to Automagic optimizer.
@@ -41,8 +43,6 @@ Models supported: SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Imag
   - Add Automagic optimizer
   - Support i2v training for LTX-Video. Thanks @GallenShao for the PR!
   - Support multiple shuffling of tags when caching text embeddings. Credit to @gitmylo for the PR.
-- 2025-05-07
-  - Switch to official implementation of LTX-Video. Allows training the 13b LTX-Video model.
 
 ## Windows support
 It will be difficult or impossible to make training work on native Windows. This is because Deepspeed only has [partial Windows support](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/README.md). Deepspeed is a hard requirement because the entire training script is built around Deepspeed pipeline parallelism. However, it will work on Windows Subsystem for Linux, specifically WSL 2. If you must use Windows I recommend trying WSL 2.

@@ -396,7 +396,6 @@ class FluxPipeline(BasePipeline):
         layers = [EmbeddingWrapper(transformer.x_embedder, transformer.time_text_embed, transformer.context_embedder, transformer.pos_embed)]
         for i, block in enumerate(transformer.transformer_blocks):
             layers.append(TransformerWrapper(block, i, self.offloader_double))
-        layers.append(concatenate_hidden_states)
         for i, block in enumerate(transformer.single_transformer_blocks):
             layers.append(SingleTransformerWrapper(block, i, self.offloader_single))
         layers.append(OutputWrapper(transformer.norm_out, transformer.proj_out))
@@ -509,12 +508,6 @@ class TransformerWrapper(nn.Module):
         return make_contiguous(hidden_states, encoder_hidden_states, temb, freqs_cos, freqs_sin, img_seq_len)
 
 
-def concatenate_hidden_states(inputs):
-    hidden_states, encoder_hidden_states, temb, freqs_cos, freqs_sin, img_seq_len = inputs
-    hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
-    return hidden_states, encoder_hidden_states, temb, freqs_cos, freqs_sin, img_seq_len
-
-
 class SingleTransformerWrapper(nn.Module):
     def __init__(self, block, block_idx, offloader):
         super().__init__()
@@ -527,8 +520,9 @@ class SingleTransformerWrapper(nn.Module):
         hidden_states, encoder_hidden_states, temb, freqs_cos, freqs_sin, img_seq_len = inputs
 
         self.offloader.wait_for_block(self.block_idx)
-        hidden_states = self.block(
+        encoder_hidden_states, hidden_states = self.block(
             hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
             temb=temb,
             image_rotary_emb=(freqs_cos, freqs_sin),
         )
@@ -546,8 +540,7 @@ class OutputWrapper(nn.Module):
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
         hidden_states, encoder_hidden_states, temb, freqs_cos, freqs_sin, img_seq_len = inputs
-        text_seq_len = encoder_hidden_states.shape[1]
         img_seq_len = img_seq_len[0].item()
-        hidden_states = hidden_states[:, text_seq_len:text_seq_len+img_seq_len, ...]
+        hidden_states = hidden_states[:, :img_seq_len, ...]
         hidden_states = self.norm_out(hidden_states, temb)
         return self.proj_out(hidden_states)
