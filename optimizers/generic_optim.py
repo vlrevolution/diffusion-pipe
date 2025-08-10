@@ -247,6 +247,7 @@ class GenericOptim(Optimizer):
             min_lr=1e-7,
             max_lr=1e-3,
             lr_bump=1e-6, # amount to bump the lr when adjusting
+            lr_decrease_factor=1.0, # how much more to decrease the LR vs increase
     ):
         self.momentum_type = momentum_type
         assert self.momentum_type in ["ema", "sm", "none"]
@@ -267,14 +268,14 @@ class GenericOptim(Optimizer):
 
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias, 'correct_dim': correct_dim,
                     'cpu_offload': cpu_offload, 'muon': muon, 'adamuon': adamuon, 'compile': compile, 'automagic': automagic, 'min_lr': min_lr,
-                    'max_lr': max_lr, 'lr_bump': lr_bump}
+                    'max_lr': max_lr, 'lr_bump': lr_bump, 'lr_decrease_factor': lr_decrease_factor}
         super().__init__(params, defaults)
         self.check_params()
         # Print out all configurations
         print(f"GenericOptim Configuration: lr={lr}, betas={betas}, eps={eps}, weight_decay={weight_decay}, "
               f"correct_bias={correct_bias}, momentum_type={momentum_type}, second_moment_type={second_moment_type}, correct_dim={correct_dim}, "
               f"cpu_offload={cpu_offload}, muon={muon}, adamuon={adamuon}, compile={compile}, automagic={automagic}, min_lr={min_lr}, "
-              f"max_lr={max_lr}, lr_bump={lr_bump}")
+              f"max_lr={max_lr}, lr_bump={lr_bump}, lr_decrease_factor={lr_decrease_factor}")
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -481,7 +482,7 @@ class GenericOptim(Optimizer):
         new_lr = torch.where(
             last_polarity == current_polarity,
             automagic_lr + lr_bump,  # Increase lr
-            automagic_lr - lr_bump  # Decrease lr
+            automagic_lr - group['lr_decrease_factor']*lr_bump  # Decrease lr
         )
         new_lr = torch.clamp(
             new_lr,
