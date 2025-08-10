@@ -1,7 +1,4 @@
-import os.path
-import sys
 import math
-sys.path.insert(0, os.path.join(os.path.abspath(os.path.dirname(__file__)), '../submodules/Wan2_1'))
 
 import torch
 from torch import nn
@@ -16,7 +13,7 @@ from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
 from models.cosmos_predict2_modeling import MiniTrainDIT
 from utils.common import load_state_dict, AUTOCAST_DTYPE
 from utils.offloading import ModelOffloader
-from wan.modules.vae import WanVAE_
+from models.wan.vae2_1 import WanVAE_
 
 
 KEEP_IN_HIGH_PRECISION = ['x_embedder', 't_embedder', 't_embedding_norm', 'final_layer']
