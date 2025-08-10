@@ -312,7 +312,7 @@ class GenericOptim(Optimizer):
                 state_device = 'cpu' if cpu_offload else p.device
 
                 # learning rate
-                if group['automagic']:
+                if group.get('automagic', False):
                     automagic_lr = self.update_automagic_lr(group, state, p.grad, state_device)
                     step_size = 1.0
                 else:
@@ -499,7 +499,7 @@ class GenericOptim(Optimizer):
         if 'avg_lr' in param_state:
             lr = param_state["avg_lr"]
         else:
-            lr = 0.0
+            lr = torch.tensor(0.0)
         return lr
 
     @torch.no_grad()
