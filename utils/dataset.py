@@ -153,17 +153,16 @@ def _cache_text_embeddings(metadata_dataset, map_fn, i, cache_dir, regenerate_ca
 # The smallest unit of a dataset. Represents a single size bucket from a single folder of images
 # and captions on disk. Not batched; returns individual items.
 class SizeBucketDataset:
-    def __init__(self, metadata_dataset, directory_config, size_bucket, model_name):
+    def __init__(self, metadata_dataset, directory_config, size_bucket, cache_base):
         self.metadata_dataset = metadata_dataset
         self.directory_config = directory_config
         self.size_bucket = size_bucket
-        self.model_name = model_name
         self.path = Path(self.directory_config['path'])
-        self.cache_dir = self.path / 'cache' / self.model_name / f'cache_{bucket_suffix(size_bucket)}'
+        self.cache_dir = cache_base / f'cache_{bucket_suffix(size_bucket)}'
 
         if len(size_bucket) == 4:
             # rename old folder name to the new one for convenience
-            old_cache_dir = self.path / 'cache' / self.model_name / f'cache_{bucket_suffix(size_bucket[1:])}'
+            old_cache_dir = cache_base / f'cache_{bucket_suffix(size_bucket[1:])}'
             if old_cache_dir.exists() and not self.cache_dir.exists():
                 old_cache_dir.rename(self.cache_dir)
 
@@ -286,15 +285,15 @@ class ConcatenatedBatchedDataset:
 
 
 class ARBucketDataset:
-    def __init__(self, ar_frames, resolutions, metadata_dataset, directory_config, model_name):
+    def __init__(self, ar_frames, resolutions, metadata_dataset, directory_config, cache_base):
         self.ar_frames = ar_frames
         self.resolutions = resolutions
         self.metadata_dataset = metadata_dataset
         self.directory_config = directory_config
-        self.model_name = model_name
         self.size_buckets = []
         self.path = Path(directory_config['path'])
-        self.cache_dir = self.path / 'cache' / self.model_name / f'ar_frames_{bucket_suffix(self.ar_frames)}'
+        self.cache_base = cache_base
+        self.cache_dir = cache_base / f'ar_frames_{bucket_suffix(self.ar_frames)}'
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def get_size_bucket_datasets(self):
@@ -319,7 +318,7 @@ class ARBucketDataset:
             # to make sure the directory has a unique name
             naming_size_bucket = (self.ar_frames[0],) + size_bucket
             self.size_buckets.append(
-                SizeBucketDataset(metadata_with_size_bucket, self.directory_config, naming_size_bucket, self.model_name)
+                SizeBucketDataset(metadata_with_size_bucket, self.directory_config, naming_size_bucket, self.cache_base)
             )
 
         for ds in self.size_buckets:
@@ -444,7 +443,7 @@ class DirectoryDataset:
                         metadata,
                         self.directory_config,
                         grouping_key,
-                        self.model_name,
+                        self.cache_dir,
                     )
                 )
             else:
@@ -454,7 +453,7 @@ class DirectoryDataset:
                         self.resolutions,
                         metadata,
                         self.directory_config,
-                        self.model_name,
+                        self.cache_dir,
                     )
                 )
 
