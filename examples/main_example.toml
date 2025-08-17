@@ -12,6 +12,8 @@ dataset = 'examples/dataset.toml'
 
 # I usually set this to a really high value because I don't know how long I want to train.
 epochs = 1000
+# Maximum number of steps to train.
+#max_steps = 5000
 # Batch size of a single forward/backward pass for one GPU.
 micro_batch_size_per_gpu = 1
 # For mixed video / image training, you can have a different batch size for images.

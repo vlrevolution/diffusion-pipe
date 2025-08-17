@@ -735,7 +735,6 @@ if __name__ == '__main__':
             pg['lr'] = config['force_constant_lr']
 
     steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
-    model_engine.total_steps = steps_per_epoch * config['epochs']
 
     eval_dataloaders = {
         name: dataset_util.PipelineDataLoader(eval_data, model_engine, config['eval_gradient_accumulation_steps'], model, num_dataloader_workers=0)
@@ -788,18 +787,22 @@ if __name__ == '__main__':
                     wandb.log({'train/epoch_loss': epoch_loss/num_steps, 'epoch': epoch})
             epoch_loss = 0
             num_steps = 0
-            epoch = new_epoch
-            if epoch is None:
+            if new_epoch is None:
+                final_model_name = f'epoch{epoch}'
                 break
+            epoch = new_epoch
 
-        saver.process_step(step)
+        checkpointed, saved = saver.process_step(step)
+        if 'max_steps' in config and step >= config['max_steps']:
+            final_model_name = f'step{step}'
+            break
         step += 1
 
     # Save final training state checkpoint and model, unless we just saved them.
     if not checkpointed:
         saver.save_checkpoint(step)
     if not saved:
-        saver.save_model(f'epoch{epoch}')
+        saver.save_model(final_model_name)
 
     if is_main_process():
         print('TRAINING COMPLETE!')

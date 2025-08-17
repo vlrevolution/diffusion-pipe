@@ -143,6 +143,7 @@ class Saver:
         return epoch, checkpointed, saved
 
     def process_step(self, step):
+        checkpointed, saved = False, False
         # Look at some simple "signal files" the user can write to save and optionally quit manually
         should_manually_save = False
         should_manually_quit = False
@@ -162,10 +163,14 @@ class Saver:
 
         if 'save_every_n_steps' in self.config and step % self.config['save_every_n_steps'] == 0:
             self.save_model(f'step{step}')
+            saved = True
 
         if need_to_checkpoint(self.config) or should_manually_save:
             self.save_checkpoint(step)
+            checkpointed = True
 
         if should_manually_quit:
             print('Manually quitting')
             sys.exit()
+
+        return checkpointed, saved
