@@ -81,7 +81,7 @@ pip install -r requirements.txt
 ```
 
 ### Cosmos requirements
-NVIDIA Cosmos (the original Cosmos video model, not Cosmos-Predict2) additionally requires TransformerEngine. Cosmos-Predict2 doesn't require TransformerEngine, but it will use it when available for a slight speed increase.
+NVIDIA Cosmos (the original Cosmos video model, not Cosmos-Predict2) additionally requires TransformerEngine.
 
 This dependency isn't in the requirements file. You probably need to set some environment variables for it to install correctly. The following command worked for me:
 ```

@@ -24,15 +24,6 @@ from torch import nn
 from torch.distributed import get_process_group_ranks
 from torchvision import transforms
 
-try:
-    import transformer_engine as te
-    from transformer_engine.pytorch.attention import DotProductAttention
-
-except Exception as e:
-    print('Importing TransformerEngine failed. Falling back to PyTorch SDPA. The import error was:')
-    print(e)
-    te = None
-
 
 def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
     """Change sign so the last dimension becomes [-odd, +even]
@@ -242,6 +233,7 @@ class RMSNorm(torch.nn.Module):
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
+    @torch.autocast('cuda', dtype=torch.float32)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
@@ -1217,7 +1209,7 @@ class MiniTrainDIT(nn.Module):
         extra_t_extrapolation_ratio: float = 1.0,
         rope_enable_fps_modulation: bool = True,
     ) -> None:
-        atten_backend = 'transformer_engine' if te is not None else 'torch'
+        atten_backend = 'torch'
 
         super().__init__()
         self.max_img_h = max_img_h
