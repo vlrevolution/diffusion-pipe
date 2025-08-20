@@ -309,14 +309,14 @@ class ARBucketDataset:
             w = round_to_nearest_multiple(w, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             h = round_to_nearest_multiple(h, IMAGE_SIZE_ROUND_TO_MULTIPLE)
             size_bucket = (w, h, self.ar_frames[1])
+            # to make sure the directory has a unique name
+            naming_size_bucket = (self.ar_frames[0],) + size_bucket
             metadata_with_size_bucket = self.metadata_dataset.map(
                 lambda example: {'size_bucket': size_bucket},
-                cache_file_name=str(self.cache_dir / 'metadata/metadata_with_size_bucket.arrow'),
+                cache_file_name=str(self.cache_dir / f'metadata/metadata_{bucket_suffix(naming_size_bucket)}.arrow'),
                 load_from_cache_file=(not regenerate_cache and trust_cache),
                 desc='Adding size bucket',
             )
-            # to make sure the directory has a unique name
-            naming_size_bucket = (self.ar_frames[0],) + size_bucket
             self.size_buckets.append(
                 SizeBucketDataset(metadata_with_size_bucket, self.directory_config, naming_size_bucket, self.cache_base)
             )
