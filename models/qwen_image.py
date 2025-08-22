@@ -247,8 +247,9 @@ class QwenImagePipeline(BasePipeline):
             dtype_to_use = dtype if any(keyword in key for keyword in KEEP_IN_HIGH_PRECISION) or tensor.ndim == 1 else transformer_dtype
             set_module_tensor_to_device(transformer, key, device='cpu', dtype=dtype_to_use, value=tensor)
 
+        attn_processor = QwenDoubleStreamAttnProcessor2_0()
         for block in transformer.transformer_blocks:
-            block.attn.set_processor(QwenDoubleStreamAttnProcessor2_0())
+            block.attn.set_processor(attn_processor)
 
         self.diffusers_pipeline.transformer = transformer
 
