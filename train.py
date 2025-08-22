@@ -535,6 +535,14 @@ if __name__ == '__main__':
     if config['compile']:
         pipeline_model.compile()
 
+    model_engine, optimizer, _, _ = deepspeed.initialize(
+        args=args,
+        model=pipeline_model,
+        config=ds_config,
+    )
+    global_batch_size = model_engine.train_micro_batch_size_per_gpu() * model_engine.gradient_accumulation_steps() * model_engine.grid.get_data_parallel_world_size()
+    print(f'Global batch size = {global_batch_size}')
+
     def get_optimizer(model_parameters):
         if len(model_parameters) == 0:
             return DummyOptimizer()
@@ -542,6 +550,13 @@ if __name__ == '__main__':
         optim_config = config['optimizer']
         optim_type = optim_config['type']
         optim_type_lower = optim_type.lower()
+
+        if beta2_half_life := optim_config.get('beta2_half_life', None):
+            betas = optim_config['betas']
+            assert len(betas) == 2
+            betas[1] = 0.5 ** (global_batch_size / beta2_half_life)
+            print(f'Computed beta2 = {betas[1]}')
+            optim_config['betas'] = betas
 
         args = []
         kwargs = {k: v for k, v in optim_config.items() if k not in ['type', 'gradient_release']}
@@ -667,13 +682,9 @@ if __name__ == '__main__':
             param_groups = model.get_param_groups(model_parameters)
             return klass(param_groups, *args, **kwargs)
 
-    model_engine, optimizer, _, _ = deepspeed.initialize(
-        args=args,
-        model=pipeline_model,
-        model_parameters=parameters_to_train,
-        optimizer=get_optimizer,
-        config=ds_config,
-    )
+    model_engine._configure_optimizer(get_optimizer, parameters_to_train)
+    optimizer = model_engine.optimizer
+
     model.model_engine = model_engine
     if model_engine.is_pipe_parallel:
          grid = model_engine.grid
