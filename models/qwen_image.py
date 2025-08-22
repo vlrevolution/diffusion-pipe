@@ -289,7 +289,6 @@ class QwenImagePipeline(BasePipeline):
             return {'latents': latents}
         return fn
 
-    # Modified from official code to always produce max length tensors.
     def _get_qwen_prompt_embeds(
         self,
         prompt,
@@ -305,7 +304,7 @@ class QwenImagePipeline(BasePipeline):
         drop_idx = self.prompt_template_encode_start_idx
         txt = [template.format(e) for e in prompt]
         txt_tokens = self.tokenizer(
-            txt, max_length=self.tokenizer_max_length + drop_idx, padding='max_length', truncation=True, return_tensors="pt"
+            txt, max_length=self.tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
         ).to(device)
         encoder_hidden_states = self.text_encoder(
             input_ids=txt_tokens.input_ids,
@@ -313,28 +312,34 @@ class QwenImagePipeline(BasePipeline):
             output_hidden_states=True,
         )
         hidden_states = encoder_hidden_states.hidden_states[-1]
-        hidden_states = hidden_states[:, drop_idx:]
-        attention_mask = txt_tokens.attention_mask[:, drop_idx:]
+        split_hidden_states = self._extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
+        split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
 
-        prompt_embeds = hidden_states.to(dtype=dtype, device=device)
-        encoder_attention_mask = attention_mask.to(dtype=torch.bool, device=device)
-
-        return prompt_embeds, encoder_attention_mask
+        return split_hidden_states
 
     def get_call_text_encoder_fn(self, text_encoder):
         def fn(caption, is_video):
             # args are lists
             assert not any(is_video)
-            prompt_embeds, prompt_embeds_mask = self._get_qwen_prompt_embeds(caption, device=text_encoder.device)
-            return {'prompt_embeds': prompt_embeds, 'prompt_embeds_mask': prompt_embeds_mask}
+            prompt_embeds = self._get_qwen_prompt_embeds(caption, device=text_encoder.device)
+            return {'prompt_embeds': prompt_embeds}
         return fn
 
     def prepare_inputs(self, inputs, timestep_quantile=None):
         latents = inputs['latents'].float()
         prompt_embeds = inputs['prompt_embeds']
-        prompt_embeds_mask = inputs['prompt_embeds_mask']
         mask = inputs['mask']
         device = latents.device
+
+        # prompt embeds are variable length
+        attn_mask_list = [torch.ones(e.size(0), dtype=torch.bool, device=device) for e in prompt_embeds]
+        max_seq_len = max([e.size(0) for e in prompt_embeds])
+        prompt_embeds = torch.stack(
+            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in prompt_embeds]
+        )
+        prompt_embeds_mask = torch.stack(
+            [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
+        )
 
         max_text_len = prompt_embeds_mask.sum(dim=1).max().item()
         prompt_embeds = prompt_embeds[:, :max_text_len, :]
@@ -383,7 +388,9 @@ class QwenImagePipeline(BasePipeline):
         x_t = (1 - t_expanded) * x_1 + t_expanded * x_0
         target = x_0 - x_1
 
-        img_shapes = torch.tensor([(1, h // 2, w // 2)], dtype=torch.int32, device=device).repeat((bs, 1))
+        img_shapes = torch.tensor([[(1, h // 2, w // 2)]], dtype=torch.int32, device=device).repeat((bs, 1, 1))
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1)
+        assert txt_seq_lens.max().item() == prompt_embeds_mask.shape[1]
         img_attention_mask = torch.ones((bs, x_t.shape[1]), dtype=torch.bool, device=device)
         attention_mask = torch.cat([prompt_embeds_mask, img_attention_mask], dim=1)
         # Make broadcastable with attention weights, which are [bs, num_heads, query_len, key_value_len]
@@ -391,7 +398,7 @@ class QwenImagePipeline(BasePipeline):
         assert attention_mask.dtype == torch.bool
 
         return (
-            (x_t, prompt_embeds, attention_mask, t, img_shapes),
+            (x_t, prompt_embeds, attention_mask, t, img_shapes, txt_seq_lens),
             (target, mask),
         )
 
@@ -438,8 +445,7 @@ class InitialLayer(nn.Module):
         self.txt_norm = model.txt_norm
         self.txt_in = model.txt_in
         self.time_text_embed = model.time_text_embed
-        self.axes_dim = model.pos_embed.axes_dim
-        self.theta = model.pos_embed.theta
+        self.pos_embed = model.pos_embed
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
@@ -447,8 +453,7 @@ class InitialLayer(nn.Module):
             if torch.is_floating_point(item):
                 item.requires_grad_(True)
 
-        hidden_states, encoder_hidden_states, attention_mask, timestep, img_shapes = inputs
-        bs = hidden_states.shape[0]
+        hidden_states, encoder_hidden_states, attention_mask, timestep, img_shapes, txt_seq_lens = inputs
 
         hidden_states = self.img_in(hidden_states)
 
@@ -458,25 +463,11 @@ class InitialLayer(nn.Module):
 
         temb = self.time_text_embed(timestep, hidden_states)
 
-        f, h, w = img_shapes[0].tolist()
-        text_seq_len = encoder_hidden_states.shape[1]
-        max_vid_index = max(h, w)
-        ids = torch.arange(max_vid_index + text_seq_len, device=hidden_states.device)
-        freqs = [
-            self.rope_params(ids, self.axes_dim[0], self.theta),
-            self.rope_params(ids, self.axes_dim[1], self.theta),
-            self.rope_params(ids, self.axes_dim[2], self.theta),
-        ]
-        freqs_cat = torch.cat(freqs, dim=1)
-        freqs_frame = freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1)
-        freqs_height = freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1)
-        freqs_width = freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        img_seq_len = f * h * w
-        vid_freqs = torch.cat([freqs_frame, freqs_height, freqs_width], dim=-1).reshape(img_seq_len, -1)
-        txt_freqs = freqs_cat[max_vid_index : max_vid_index + text_seq_len, ...]
+        img_shapes = img_shapes.tolist()
+        txt_seq_lens = txt_seq_lens.tolist()
+        vid_freqs, txt_freqs = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
 
         return make_contiguous(hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs)
-
 
     def rope_params(self, index, dim, theta=10000):
         """

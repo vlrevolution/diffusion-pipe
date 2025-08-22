@@ -868,13 +868,16 @@ class Dataset:
     # Each feature can be a tensor, list, or single item.
     def _collate(self, examples):
         ret = {}
-        for key, value in examples[0].items():
+        for key in examples[0]:
             if key == 'mask':
                 continue  # mask is handled specially below
-            if torch.is_tensor(value):
-                ret[key] = torch.stack([example[key] for example in examples])
-            else:
-                ret[key] = [example[key] for example in examples]
+            features = [example[key] for example in examples]
+            if torch.is_tensor(features[0]):
+                shape = features[0].shape
+                if all(f.shape == shape for f in features):
+                    # if we can form a single batched tensor, do it
+                    features = torch.stack(features)
+            ret[key] = features
         # Only some items in the batch might have valid mask.
         masks = [example['mask'] for example in examples]
         # See if we have any valid masks. If we do, they should all have the same shape.
@@ -1087,8 +1090,13 @@ class DatasetManager:
         # Need to move to CPU here. If we don't, we get this error:
         # RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use the 'spawn' start method
         # I think this is because HF Datasets uses the multiprocess library (different from Python multiprocessing!) so it will always use fork.
-        results = {k: v.to('cpu') for k, v in results.items()}
-        pipe.send(results)
+        cpu_results = {}
+        for k, v in results.items():
+            if isinstance(v, list):
+                cpu_results[k] = [x.to('cpu') for x in v]
+            else:
+                cpu_results[k] = v.to('cpu')
+        pipe.send(cpu_results)
 
 
 def split_batch(batch, pieces):
