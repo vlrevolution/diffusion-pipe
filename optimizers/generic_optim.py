@@ -248,11 +248,13 @@ class GenericOptim(Optimizer):
             max_lr=1e-3,
             lr_bump=1e-6, # amount to bump the lr when adjusting
             lr_decrease_factor=1.0, # how much more to decrease the LR vs increase
+            skip_invalid_grads=False,
     ):
         self.momentum_type = momentum_type
         assert self.momentum_type in ["ema", "sm", "none"]
         self.second_moment_type = second_moment_type
         assert self.second_moment_type in ["ema", "none", "sn", "factored"]
+        self.skip_invalid_grads = skip_invalid_grads
 
         require_version("torch>=1.5.0")  # add_ with alpha
         if lr < 0.0:
@@ -299,7 +301,7 @@ class GenericOptim(Optimizer):
                 if p.grad.is_sparse:
                     raise RuntimeError("Currently does not support sparse gradients.")
 
-                if has_inf_or_nan(p.grad):
+                if self.skip_invalid_grads and has_inf_or_nan(p.grad):
                     skipped_parameter_names.append(getattr(p, 'original_name', None))
                     continue
 
