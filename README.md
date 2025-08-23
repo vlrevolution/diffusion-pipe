@@ -14,7 +14,7 @@ Models supported: SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Imag
 
 ## Recent changes
 - 2025-08-23
-  - Support Qwen-Image-Edit.
+  - Support Qwen-Image-Edit. Make sure to update dependencies. You will need the latest Diffusers.
 - 2025-08-07
   - Fix Flux training error caused by a breaking change in Diffusers. Make sure to update requirements.
 - 2025-08-06

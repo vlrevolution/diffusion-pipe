@@ -394,3 +394,5 @@ timestep_sample_method = 'logit_normal'
 Configuring and training Qwen-Image-Edit is the same as Flux-Kontext. See the [example dataset config](../examples/flux_kontext_dataset.toml). The same dataset considerations apply. The reference images are resized to whatever size bucket the target images end up in, so your reference images need to have approximately the same aspect ratio as the targets, or else they will be overly cropped.
 
 The model is taking larger inputs than T2I training, so it is slower and uses more VRAM. I don't know if you can train it on 24GB VRAM. Maybe if you block swap enough.
+
+Qwen-Image-Edit LoRAs are saved in ComfyUI format.
