@@ -17,6 +17,7 @@
 |Flux Kontext    |✅    |✅              |✅                |
 |Wan2.2          |✅    |✅              |✅                |
 |Qwen-Image      |✅    |✅              |✅                |
+|Qwen-Image-Edit |✅    |✅              |✅                |
 
 
 ## SDXL
@@ -378,3 +379,18 @@ Qwen-Image LoRAs are saved in ComfyUI format.
 - Use the expandable segments CUDA feature: ```PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True NCCL_P2P_DISABLE="1" NCCL_IB_DISABLE="1" deepspeed --num_gpus=1 train.py --deepspeed --config /home/anon/code/diffusion-pipe-configs/tmp.toml```
 - Use a dataset resolution of 640. This is one of the resolutions the model was trained with and might work a bit better than 512.
 - If you use higher LoRA rank or higher resolution, you might need to increase blocks_to_swap.
+
+## Qwen-Image-Edit
+```
+[model]
+type = 'qwen_image'
+diffusers_path = '/data/imagegen_models/Qwen-Image'  # or, Qwen-Image-Edit Diffusers folder
+# Only needed if you are using Qwen-Image Diffusers model instead of Qwen-Image-Edit
+transformer_path = '/data/imagegen_models/comfyui-models/qwen_image_edit_bf16.safetensors'
+dtype = 'bfloat16'
+transformer_dtype = 'float8'
+timestep_sample_method = 'logit_normal'
+```
+Configuring and training Qwen-Image-Edit is the same as Flux-Kontext. See the [example dataset config](../examples/flux_kontext_dataset.toml). The same dataset considerations apply. The reference images are resized to whatever size bucket the target images end up in, so your reference images need to have approximately the same aspect ratio as the targets, or else they will be overly cropped.
+
+The model is taking larger inputs than T2I training, so it is slower and uses more VRAM. I don't know if you can train it on 24GB VRAM. Maybe if you block swap enough.

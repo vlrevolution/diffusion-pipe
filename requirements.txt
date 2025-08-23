@@ -1,7 +1,7 @@
 deepspeed==0.17.0
 toml
 transformers
-git+https://github.com/huggingface/diffusers@50e18ee6982f8006e7247c756c573b8204fe354b
+diffusers>=0.35.1
 datasets
 pillow
 sentencepiece

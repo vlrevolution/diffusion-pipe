@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from typing import Union, Tuple, Optional
+import math
 
 import torch
 from torch import nn
@@ -12,6 +13,7 @@ import safetensors
 from accelerate import init_empty_weights
 from accelerate.utils import set_module_tensor_to_device
 import transformers
+from PIL import Image, ImageOps
 
 from models.base import BasePipeline, PreprocessMediaFile, make_contiguous
 from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift, iterate_safetensors
@@ -177,13 +179,24 @@ class QwenImagePipeline(BasePipeline):
     checkpointable_layers = ['TransformerLayer']
     adapter_target_modules = ['QwenImageTransformerBlock']
 
+    prompt_template_encode = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+    prompt_template_encode_start_idx = 34
+    prompt_template_encode_edit = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+    prompt_template_encode_start_idx_edit = 64
+
+    # Size of image fed to the VLM for Qwen-Image-Edit
+    vlm_image_size = 1024
+
     def __init__(self, config):
         self.config = config
         self.model_config = self.config['model']
         self.offloader = ModelOffloader('dummy', [], 0, 0, True, torch.device('cuda'), False, debug=False)
         dtype = self.model_config['dtype']
 
+        self.preprocess_media_file_fn = PreprocessMediaFile(self.config, support_video=True, framerate=1)
+
         tokenizer = transformers.Qwen2Tokenizer.from_pretrained('configs/qwen_image/tokenizer', local_files_only=True)
+        processor = transformers.Qwen2VLProcessor.from_pretrained('configs/qwen_image/processor', local_files_only=True)
 
         if 'text_encoder_path' in self.model_config:
             text_encoder_path = self.model_config['text_encoder_path']
@@ -219,6 +232,8 @@ class QwenImagePipeline(BasePipeline):
             tokenizer=tokenizer,
             transformer=None,
         )
+
+        self.diffusers_pipeline.processor = processor
 
         latents_mean = (
             torch.tensor(self.vae.config.latents_mean)
@@ -276,22 +291,44 @@ class QwenImagePipeline(BasePipeline):
         safetensors.torch.save_file(state_dict, save_dir / 'model.safetensors', metadata={'format': 'pt'})
 
     def get_preprocess_media_file_fn(self):
-        return PreprocessMediaFile(
-            self.config,
-            support_video=True,
-            framerate=1,
-        )
+        return self.preprocess_media_file_fn
 
     def get_call_vae_fn(self, vae):
-        def fn(image):
+        def fn(*args):
+            image = args[0]
             latents = vae.encode(image.to(vae.device, vae.dtype)).latent_dist.mode()
             latents = (latents - vae.latents_mean_tensor) / vae.latents_std_tensor
-            return {'latents': latents}
+            result = {'latents': latents}
+            if len(args) == 2:
+                control_image = args[1]
+                control_latents = vae.encode(control_image.to(vae.device, vae.dtype)).latent_dist.mode()
+                control_latents = (control_latents - vae.latents_mean_tensor) / vae.latents_std_tensor
+                result['control_latents'] = control_latents
+            return result
         return fn
+
+    def load_image_for_vlm(self, path):
+        pil_img = Image.open(path)
+        height, width = pil_img.height, pil_img.width
+
+        if pil_img.mode not in ['RGB', 'RGBA'] and 'transparency' in pil_img.info:
+            pil_img = pil_img.convert('RGBA')
+
+        # add white background for transparent images
+        if pil_img.mode == 'RGBA':
+            canvas = Image.new('RGBA', pil_img.size, (255, 255, 255))
+            canvas.alpha_composite(pil_img)
+            pil_img = canvas.convert('RGB')
+        else:
+            pil_img = pil_img.convert('RGB')
+
+        scale_factor = self.vlm_image_size / math.sqrt(height*width)
+        return ImageOps.scale(pil_img, scale_factor)
 
     def _get_qwen_prompt_embeds(
         self,
         prompt,
+        control_files,
         device=None,
         dtype=None,
     ):
@@ -300,28 +337,53 @@ class QwenImagePipeline(BasePipeline):
 
         prompt = [prompt] if isinstance(prompt, str) else prompt
 
-        template = self.prompt_template_encode
-        drop_idx = self.prompt_template_encode_start_idx
-        txt = [template.format(e) for e in prompt]
-        txt_tokens = self.tokenizer(
-            txt, max_length=self.tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
-        ).to(device)
-        encoder_hidden_states = self.text_encoder(
-            input_ids=txt_tokens.input_ids,
-            attention_mask=txt_tokens.attention_mask,
-            output_hidden_states=True,
-        )
-        hidden_states = encoder_hidden_states.hidden_states[-1]
-        split_hidden_states = self._extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
+        if control_files is None:
+            template = self.prompt_template_encode
+            drop_idx = self.prompt_template_encode_start_idx
+            txt = [template.format(e) for e in prompt]
+            txt_tokens = self.tokenizer(
+                txt, max_length=self.tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
+            ).to(device)
+            attention_mask = txt_tokens.attention_mask
+            outputs = self.text_encoder(
+                input_ids=txt_tokens.input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+            )
+        else:
+            template = self.prompt_template_encode_edit
+            drop_idx = self.prompt_template_encode_start_idx_edit
+            txt = [template.format(e) for e in prompt]
+            images = [
+                self.load_image_for_vlm(file)
+                for file in control_files
+            ]
+            model_inputs = self.processor(
+                text=txt,
+                images=images,
+                padding=True,
+                return_tensors="pt",
+            ).to(device)
+            attention_mask = model_inputs.attention_mask
+            outputs = self.text_encoder(
+                input_ids=model_inputs.input_ids,
+                attention_mask=attention_mask,
+                pixel_values=model_inputs.pixel_values,
+                image_grid_thw=model_inputs.image_grid_thw,
+                output_hidden_states=True,
+            )
+
+        hidden_states = outputs.hidden_states[-1]
+        split_hidden_states = self._extract_masked_hidden(hidden_states, attention_mask)
         split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
 
         return split_hidden_states
 
     def get_call_text_encoder_fn(self, text_encoder):
-        def fn(caption, is_video):
+        def fn(caption, is_video, control_file: list[str] | None):
             # args are lists
             assert not any(is_video)
-            prompt_embeds = self._get_qwen_prompt_embeds(caption, device=text_encoder.device)
+            prompt_embeds = self._get_qwen_prompt_embeds(caption, control_file, device=text_encoder.device)
             return {'prompt_embeds': prompt_embeds}
         return fn
 
@@ -388,9 +450,21 @@ class QwenImagePipeline(BasePipeline):
         x_t = (1 - t_expanded) * x_1 + t_expanded * x_0
         target = x_0 - x_1
 
-        img_shapes = torch.tensor([[(1, h // 2, w // 2)]], dtype=torch.int32, device=device).repeat((bs, 1, 1))
-        txt_seq_lens = prompt_embeds_mask.sum(dim=1)
-        assert txt_seq_lens.max().item() == prompt_embeds_mask.shape[1]
+        img_shapes = [(1, h // 2, w // 2)]
+
+        if 'control_latents' in inputs:
+            control_latents = inputs['control_latents'].float()
+            control_latents = self._pack_latents(control_latents, bs, num_channels_latents, h, w)
+            assert control_latents.shape == latents.shape, (control_latents.shape, latents.shape)
+            img_seq_len = torch.tensor(x_t.shape[1], device=x_t.device).repeat((bs,))
+            extra = (img_seq_len,)
+            x_t = torch.cat([x_t, control_latents], dim=1)
+            img_shapes.append((1, h // 2, w // 2))
+        else:
+            extra = tuple()
+
+        img_shapes = torch.tensor([img_shapes], dtype=torch.int32, device=device).repeat((bs, 1, 1))
+        txt_seq_lens = torch.tensor([max_text_len], dtype=torch.int32, device=device).repeat((bs,))
         img_attention_mask = torch.ones((bs, x_t.shape[1]), dtype=torch.bool, device=device)
         attention_mask = torch.cat([prompt_embeds_mask, img_attention_mask], dim=1)
         # Make broadcastable with attention weights, which are [bs, num_heads, query_len, key_value_len]
@@ -398,7 +472,7 @@ class QwenImagePipeline(BasePipeline):
         assert attention_mask.dtype == torch.bool
 
         return (
-            (x_t, prompt_embeds, attention_mask, t, img_shapes, txt_seq_lens),
+            (x_t, prompt_embeds, attention_mask, t, img_shapes, txt_seq_lens) + extra,
             (target, mask),
         )
 
@@ -453,7 +527,7 @@ class InitialLayer(nn.Module):
             if torch.is_floating_point(item):
                 item.requires_grad_(True)
 
-        hidden_states, encoder_hidden_states, attention_mask, timestep, img_shapes, txt_seq_lens = inputs
+        hidden_states, encoder_hidden_states, attention_mask, timestep, img_shapes, txt_seq_lens, *extra = inputs
 
         hidden_states = self.img_in(hidden_states)
 
@@ -467,7 +541,7 @@ class InitialLayer(nn.Module):
         txt_seq_lens = txt_seq_lens.tolist()
         vid_freqs, txt_freqs = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
 
-        return make_contiguous(hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs)
+        return make_contiguous(hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs) + tuple(extra)
 
     def rope_params(self, index, dim, theta=10000):
         """
@@ -489,7 +563,7 @@ class TransformerLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs = inputs
+        hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs, *extra = inputs
 
         self.offloader.wait_for_block(self.block_idx)
         encoder_hidden_states, hidden_states = self.block(
@@ -502,7 +576,7 @@ class TransformerLayer(nn.Module):
         )
         self.offloader.submit_move_blocks_forward(self.block_idx)
 
-        return make_contiguous(hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs)
+        return make_contiguous(hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs) + tuple(extra)
 
 
 class FinalLayer(nn.Module):
@@ -517,7 +591,11 @@ class FinalLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs = inputs
+        hidden_states, encoder_hidden_states, attention_mask, temb, vid_freqs, txt_freqs, *extra = inputs
         hidden_states = self.norm_out(hidden_states, temb)
         output = self.proj_out(hidden_states)
+        if len(extra) > 0:
+            assert len(extra) == 1
+            img_seq_len = extra[0][0].item()
+            output = output[:, :img_seq_len, ...]
         return output

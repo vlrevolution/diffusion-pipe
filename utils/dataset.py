@@ -7,6 +7,7 @@ import os
 import hashlib
 import json
 import tarfile
+from inspect import signature
 
 import numpy as np
 import torch
@@ -129,13 +130,15 @@ class TextEmbeddingDataset:
 def _cache_text_embeddings(metadata_dataset, map_fn, i, cache_dir, regenerate_cache, caching_batch_size):
 
     def flatten_captions(example):
-        image_spec_out, caption_out, is_video_out = [], [], []
-        for image_spec, captions, is_video in zip(example['image_spec'], example['caption'], example['is_video']):
+        result = {key: [] for key in example}
+        for i, captions in enumerate(example['caption']):
             for caption in captions:
-                image_spec_out.append(image_spec)
-                caption_out.append(caption)
-                is_video_out.append(is_video)
-        return {'image_spec': image_spec_out, 'caption': caption_out, 'is_video': is_video_out}
+                result['caption'].append(caption)
+                for key, value in example.items():
+                    if key == 'caption':
+                        continue
+                    result[key].append(value[i])
+        return result
 
     flattened_captions = metadata_dataset.map(flatten_captions, batched=True, keep_in_memory=True, remove_columns=metadata_dataset.column_names)
     te_dataset = _map_and_cache(
@@ -977,7 +980,8 @@ def _cache_fn(datasets, queue, preprocess_media_file_fn, num_text_encoders, rege
     for text_encoder_idx in range(num_text_encoders):
         def text_embedding_map_fn(example, rank):
             parent_conn, child_conn = pipes.setdefault(rank, mp.Pipe(duplex=False))
-            queue.put((text_encoder_idx+1, example['caption'], example['is_video'], child_conn))
+            control_file = example['control_file'] if 'control_file' in example else None
+            queue.put((text_encoder_idx+1, example['caption'], example['is_video'], control_file, child_conn))
             result = parent_conn.recv()  # dict
             result['image_spec'] = example['image_spec']
             return result
@@ -998,6 +1002,10 @@ class DatasetManager:
         self.submodels = [self.vae] + list(self.text_encoders)
         self.call_vae_fn = self.model.get_call_vae_fn(self.vae)
         self.call_text_encoder_fns = [self.model.get_call_text_encoder_fn(text_encoder) for text_encoder in self.text_encoders]
+        self.te_fn_requires_control_file = [
+            len(signature(fn).parameters) == 3
+            for fn in self.call_text_encoder_fns
+        ]
         self.regenerate_cache = regenerate_cache
         self.trust_cache = trust_cache
         self.caching_batch_size = caching_batch_size
@@ -1083,8 +1091,12 @@ class DatasetManager:
             else:
                 results = self.call_vae_fn(tensor)
         elif id > 0:
-            caption, is_video, pipe = task[1:]
-            results = self.call_text_encoder_fns[id-1](caption, is_video=is_video)
+            caption, is_video, control_file, pipe = task[1:]
+            args = [caption, is_video]
+            idx = id - 1
+            if self.te_fn_requires_control_file[idx]:
+                args.append(control_file)
+            results = self.call_text_encoder_fns[idx](*args)
         else:
             raise RuntimeError()
         # Need to move to CPU here. If we don't, we get this error:
