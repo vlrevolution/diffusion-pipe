@@ -551,7 +551,7 @@ if __name__ == '__main__':
         optim_type = optim_config['type']
         optim_type_lower = optim_type.lower()
 
-        if beta2_half_life := optim_config.get('beta2_half_life', None):
+        if beta2_half_life := optim_config.pop('beta2_half_life', None):
             betas = optim_config['betas']
             assert len(betas) == 2
             betas[1] = 0.5 ** (global_batch_size / beta2_half_life)
