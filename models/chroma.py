@@ -420,6 +420,17 @@ class TransformerWrapper(nn.Module):
 
         self.offloader.wait_for_block(self.idx)
 
+        double_mod = self._get_mods(mod_vectors)
+        img, txt = self.block(
+            img=img, txt=txt, pe=pe, distill_vec=double_mod, mask=txt_img_mask
+        )
+
+        self.offloader.submit_move_blocks_forward(self.idx)
+
+        return make_contiguous(img, txt, pe, mod_vectors, txt_img_mask)
+
+    @torch.compiler.disable
+    def _get_mods(self, mod_vectors):
         img_mod_spec = modulation_distribute_dict[f"double_blocks.{self.idx}.img_mod.lin"]
         txt_mod_spec = modulation_distribute_dict[f"double_blocks.{self.idx}.txt_mod.lin"]
         img_mod = [
@@ -438,14 +449,7 @@ class TransformerWrapper(nn.Module):
             )
             for spec in txt_mod_spec
         ]
-        double_mod = [img_mod, txt_mod]
-        img, txt = self.block(
-            img=img, txt=txt, pe=pe, distill_vec=double_mod, mask=txt_img_mask
-        )
-
-        self.offloader.submit_move_blocks_forward(self.idx)
-
-        return make_contiguous(img, txt, pe, mod_vectors, txt_img_mask)
+        return [img_mod, txt_mod]
 
 
 def concatenate_hidden_states(inputs):
@@ -467,17 +471,22 @@ class SingleTransformerWrapper(nn.Module):
 
         self.offloader.wait_for_block(self.idx)
 
+        single_mod = self._get_mods(mod_vectors)
+        img = self.block(img, pe=pe, distill_vec=single_mod, mask=txt_img_mask)
+
+        self.offloader.submit_move_blocks_forward(self.idx)
+
+        return make_contiguous(img, txt, pe, mod_vectors, txt_img_mask)
+
+    @torch.compiler.disable
+    def _get_mods(self, mod_vectors):
         single_mod_spec = modulation_distribute_dict[f"single_blocks.{self.idx}.modulation.lin"]
         single_mod = ModulationOut(
             shift=mod_vectors[:, single_mod_spec.shift, :],
             scale=mod_vectors[:, single_mod_spec.scale, :],
             gate=mod_vectors[:, single_mod_spec.gate, :],
         )
-        img = self.block(img, pe=pe, distill_vec=single_mod, mask=txt_img_mask)
-
-        self.offloader.submit_move_blocks_forward(self.idx)
-
-        return make_contiguous(img, txt, pe, mod_vectors, txt_img_mask)
+        return single_mod
 
 
 class FinalLayer(nn.Module):
