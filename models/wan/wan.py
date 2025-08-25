@@ -442,6 +442,7 @@ class InitialLayer(nn.Module):
             assert not torch.is_floating_point(text_embeddings_or_ids)
             with torch.no_grad():
                 context = self.text_encoder(text_embeddings_or_ids, seq_lens_or_text_mask)
+            context.requires_grad_(True)
             text_seq_lens = seq_lens_or_text_mask.gt(0).sum(dim=1).long()
         else:
             context = text_embeddings_or_ids
