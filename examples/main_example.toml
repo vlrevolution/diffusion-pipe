@@ -30,6 +30,8 @@ warmup_steps = 100
 # Force the learning rate to be this value, regardless of what the optimizer or anything else says.
 # Can be used to change learning rate even when resuming from checkpoint.
 #force_constant_lr = 1e-5
+# Can be 'constant' or 'linear'. If unset, will default to 'constant', i.e. no LR scheduler.
+#lr_scheduler = 'linear'
 
 # Block swapping is supported for Wan, HunyuanVideo, Flux, and Chroma. This value controls the number
 # of blocks kept offloaded to RAM. Increasing it lowers VRAM use, but has a performance penalty. The

@@ -714,6 +714,20 @@ if __name__ == '__main__':
     model_engine.communication_data_type = communication_data_type
 
     train_dataloader = dataset_util.PipelineDataLoader(train_data, model_engine, model_engine.gradient_accumulation_steps(), model)
+    steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
+
+    scheduler_type = config.get('lr_scheduler', 'constant')
+    if scheduler_type == 'constant':
+        lr_scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
+    elif scheduler_type == 'linear':
+        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=config['epochs'] * steps_per_epoch)
+    else:
+        raise NotImplementedError(f'Unknown lr_scheduler: {scheduler_type}')
+    if config['warmup_steps'] > 0:
+        warmup_steps = config['warmup_steps']
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1/warmup_steps, total_iters=warmup_steps)
+        lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, lr_scheduler], milestones=[warmup_steps])
+    model_engine.lr_scheduler = lr_scheduler
 
     step = 1
     # make sure to do this before calling model_engine.set_dataloader(), as that method creates an iterator
@@ -740,23 +754,10 @@ if __name__ == '__main__':
         for pg in optimizer.param_groups:
             pg['lr'] = config['force_constant_lr']
 
-    steps_per_epoch = len(train_dataloader) // model_engine.gradient_accumulation_steps()
-
     eval_dataloaders = {
         name: dataset_util.PipelineDataLoader(eval_data, model_engine, config['eval_gradient_accumulation_steps'], model, num_dataloader_workers=0)
         for name, eval_data in eval_data_map.items()
     }
-
-    scheduler_type = config.get('lr_scheduler', 'constant')
-    if scheduler_type == 'constant':
-        lr_scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer, factor=1.0)
-    elif scheduler_type == 'linear':
-        lr_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=config['epochs'] * steps_per_epoch)
-    if config['warmup_steps'] > 0:
-        warmup_steps = config['warmup_steps']
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1/warmup_steps, total_iters=warmup_steps)
-        lr_scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, lr_scheduler], milestones=[warmup_steps])
-    model_engine.lr_scheduler = lr_scheduler
 
     epoch = train_dataloader.epoch
     tb_writer = SummaryWriter(log_dir=run_dir) if is_main_process() else None
