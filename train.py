@@ -89,7 +89,7 @@ ds_pipe_module.PipelineModule._count_layer_params = _count_all_layer_params
 
 def set_config_defaults(config):
     # Force the user to set this. If we made it a default of 1, it might use a lot of disk space.
-    assert 'save_every_n_epochs' in config or 'save_every_n_steps' in config
+    assert 'save_every_n_epochs' in config or 'save_every_n_steps' in config or 'save_every_n_examples' in config
 
     config.setdefault('pipeline_stages', 1)
     config.setdefault('activation_checkpointing', False)
@@ -127,6 +127,7 @@ def set_config_defaults(config):
     config.setdefault('eval_gradient_accumulation_steps', 1)
     config.setdefault('eval_every_n_steps', None)
     config.setdefault('eval_every_n_epochs', None)
+    config.setdefault('eval_every_n_examples', None)
     config.setdefault('eval_before_first_step', True)
     config.setdefault('compile', False)
 
@@ -181,7 +182,7 @@ def evaluate_single(model_engine, eval_dataloader, eval_gradient_accumulation_st
     return total_loss / count
 
 
-def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps):
+def _evaluate(model_engine, eval_dataloaders, tb_writer, examples, eval_gradient_accumulation_steps):
     pbar_total = 0
     for eval_dataloader in eval_dataloaders.values():
         pbar_total += len(eval_dataloader) * len(TIMESTEP_QUANTILES_FOR_EVAL) // eval_gradient_accumulation_steps
@@ -198,24 +199,24 @@ def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_acc
             loss = evaluate_single(model_engine, eval_dataloader, eval_gradient_accumulation_steps, quantile, pbar=pbar)
             losses.append(loss)
             if is_main_process():
-                tb_writer.add_scalar(f'{name}/loss_quantile_{quantile:.2f}', loss, step)
+                tb_writer.add_scalar(f'{name}/loss_quantile_{quantile:.2f}', loss, examples)
                 if wandb_enable:
-                    wandb.log({f'{name}/loss_quantile_{quantile:.2f}': loss, 'step': step})
+                    wandb.log({f'{name}/loss_quantile_{quantile:.2f}': loss, 'examples': examples})
         avg_loss = sum(losses) / len(losses)
         if is_main_process():
-            tb_writer.add_scalar(f'{name}/loss', avg_loss, step)
+            tb_writer.add_scalar(f'{name}/loss', avg_loss, examples)
             if wandb_enable:
-                wandb.log({f'{name}/loss': avg_loss, 'step': step})
+                wandb.log({f'{name}/loss': avg_loss, 'examples': examples})
 
     duration = time.time() - start
     if is_main_process():
-        tb_writer.add_scalar('eval/eval_time_sec', duration, step)
+        tb_writer.add_scalar('eval/eval_time_sec', duration, examples)
         if wandb_enable:
-            wandb.log({'eval/eval_time_sec': duration, 'step': step})
+            wandb.log({'eval/eval_time_sec': duration, 'examples': examples})
         pbar.close()
 
 
-def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps, disable_block_swap):
+def evaluate(model, model_engine, eval_dataloaders, tb_writer, examples, eval_gradient_accumulation_steps, disable_block_swap):
     if len(eval_dataloaders) == 0:
         return
     empty_cuda_cache()
@@ -225,7 +226,7 @@ def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradie
         random.seed(seed)
         torch.manual_seed(seed)
         np.random.seed(seed)
-        _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps)
+        _evaluate(model_engine, eval_dataloaders, tb_writer, examples, eval_gradient_accumulation_steps)
     empty_cuda_cache()
     model.prepare_block_swap_training()
 
@@ -543,6 +544,13 @@ if __name__ == '__main__':
     global_batch_size = model_engine.train_micro_batch_size_per_gpu() * model_engine.gradient_accumulation_steps() * model_engine.grid.get_data_parallel_world_size()
     print(f'Global batch size = {global_batch_size}')
 
+    if save_every_n_examples := config.pop('save_every_n_examples', None):
+        config['save_every_n_steps'] = save_every_n_examples // global_batch_size
+        print(f"Computed save_every_n_steps = {config['save_every_n_steps']}")
+    if eval_every_n_examples := config.pop('eval_every_n_examples', None):
+        config['eval_every_n_steps'] = eval_every_n_examples // global_batch_size
+        print(f"Computed eval_every_n_steps = {config['eval_every_n_steps']}")
+
     def get_optimizer(model_parameters):
         if len(model_parameters) == 0:
             return DummyOptimizer()
@@ -730,6 +738,7 @@ if __name__ == '__main__':
     model_engine.lr_scheduler = lr_scheduler
 
     step = 1
+    examples = global_batch_size
     # make sure to do this before calling model_engine.set_dataloader(), as that method creates an iterator
     # which starts creating dataloader internal state
     if resume_from_checkpoint:
@@ -745,6 +754,10 @@ if __name__ == '__main__':
         else:
             train_dataloader.load_state_dict(client_state['custom_loader'])
         step = client_state['step'] + 1
+        if 'examples' in client_state:
+            examples = client_state['examples']
+        else:
+            examples = step * global_batch_size
         del client_state
         if is_main_process():
             print(f'Resuming training from checkpoint. Resuming at epoch: {train_dataloader.epoch}, step: {step}')
@@ -779,24 +792,24 @@ if __name__ == '__main__':
         num_steps += 1
         train_dataloader.sync_epoch()
 
-        new_epoch, checkpointed, saved = saver.process_epoch(epoch, step)
+        new_epoch, checkpointed, saved = saver.process_epoch(epoch, step, examples)
         finished_epoch = True if new_epoch != epoch else False
 
         if is_main_process() and step % config['logging_steps'] == 0:
-            tb_writer.add_scalar(f'train/loss', loss, step)
+            tb_writer.add_scalar(f'train/loss', loss, examples)
             if wandb_enable:
-                wandb.log({'train/loss': loss, 'step': step})
+                wandb.log({'train/loss': loss, 'examples': examples})
             if optimizer.__class__.__name__ == 'Prodigy':
                 prodigy_d = get_prodigy_d(optimizer)
-                tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, step)
+                tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, examples)
             if optimizer.__class__.__name__ in ('Automagic', 'GenericOptim'):
                 lrs, avg_lr = _get_automagic_lrs(optimizer)
                 if avg_lr > 0:
-                    tb_writer.add_histogram(f'train/automagic_lrs', lrs, step)
-                    tb_writer.add_scalar(f'train/automagic_avg_lr', avg_lr, step)
+                    tb_writer.add_histogram(f'train/automagic_lrs', lrs, examples)
+                    tb_writer.add_scalar(f'train/automagic_avg_lr', avg_lr, examples)
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
-            evaluate(model, model_engine, eval_dataloaders, tb_writer, step, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
+            evaluate(model, model_engine, eval_dataloaders, tb_writer, examples, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
 
         if finished_epoch:
             if is_main_process():
@@ -810,15 +823,16 @@ if __name__ == '__main__':
                 break
             epoch = new_epoch
 
-        checkpointed, saved = saver.process_step(step)
+        checkpointed, saved = saver.process_step(step, examples)
         if 'max_steps' in config and step >= config['max_steps']:
             final_model_name = f'step{step}'
             break
         step += 1
+        examples += global_batch_size
 
     # Save final training state checkpoint and model, unless we just saved them.
     if not checkpointed:
-        saver.save_checkpoint(step)
+        saver.save_checkpoint(step, examples)
     if not saved:
         saver.save_model(final_model_name)
 

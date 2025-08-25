@@ -84,7 +84,7 @@ class Saver:
             shutil.copy(self.args.config, save_dir)
             shutil.rmtree(tmp_dir)
 
-    def save_full_model(self, name, max_shard_size='5GB'):
+    def save_full_model(self, name):
         dp_id = self.model_engine.grid.get_data_parallel_rank()
         stage_id = self.model_engine.grid.get_pipe_parallel_rank()
         save_dir = self.save_root / name
@@ -115,22 +115,23 @@ class Saver:
         else:
             self.save_full_model(name)
 
-    def save_checkpoint(self, step):
+    def save_checkpoint(self, step, examples):
         self.model_engine.save_checkpoint(
             self.save_root,
             client_state={
                 'step': step,
+                'examples': examples,
                 'custom_loader': self.train_dataloader.state_dict(),
             },
             save_latest=True,
             exclude_frozen_parameters=True
         )
 
-    def process_epoch(self, epoch, step):
+    def process_epoch(self, epoch, step, examples):
         checkpointed, saved = False, False
         if self.train_dataloader.epoch != epoch:
             if need_to_checkpoint(self.config, epoch):
-                self.save_checkpoint(step)
+                self.save_checkpoint(step, examples)
                 checkpointed = True
             if 'save_every_n_epochs' in self.config and epoch % self.config['save_every_n_epochs'] == 0:
                 self.save_model(f'epoch{epoch}')
@@ -142,7 +143,7 @@ class Saver:
                 print(f'Started new epoch: {epoch}')
         return epoch, checkpointed, saved
 
-    def process_step(self, step):
+    def process_step(self, step, examples):
         checkpointed, saved = False, False
         # Look at some simple "signal files" the user can write to save and optionally quit manually
         should_manually_save = False
@@ -166,7 +167,7 @@ class Saver:
             saved = True
 
         if need_to_checkpoint(self.config) or should_manually_save:
-            self.save_checkpoint(step)
+            self.save_checkpoint(step, examples)
             checkpointed = True
 
         if should_manually_quit:
