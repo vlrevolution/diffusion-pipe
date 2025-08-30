@@ -130,6 +130,7 @@ def set_config_defaults(config):
     config.setdefault('eval_every_n_examples', None)
     config.setdefault('eval_before_first_step', True)
     config.setdefault('compile', False)
+    config.setdefault('x_axis_examples', False)
 
 
 def get_most_recent_run_dir(output_dir):
@@ -182,7 +183,7 @@ def evaluate_single(model_engine, eval_dataloader, eval_gradient_accumulation_st
     return total_loss / count
 
 
-def _evaluate(model_engine, eval_dataloaders, tb_writer, examples, eval_gradient_accumulation_steps):
+def _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps):
     pbar_total = 0
     for eval_dataloader in eval_dataloaders.values():
         pbar_total += len(eval_dataloader) * len(TIMESTEP_QUANTILES_FOR_EVAL) // eval_gradient_accumulation_steps
@@ -199,24 +200,24 @@ def _evaluate(model_engine, eval_dataloaders, tb_writer, examples, eval_gradient
             loss = evaluate_single(model_engine, eval_dataloader, eval_gradient_accumulation_steps, quantile, pbar=pbar)
             losses.append(loss)
             if is_main_process():
-                tb_writer.add_scalar(f'{name}/loss_quantile_{quantile:.2f}', loss, examples)
+                tb_writer.add_scalar(f'{name}/loss_quantile_{quantile:.2f}', loss, step)
                 if wandb_enable:
-                    wandb.log({f'{name}/loss_quantile_{quantile:.2f}': loss, 'examples': examples})
+                    wandb.log({f'{name}/loss_quantile_{quantile:.2f}': loss, 'step': step})
         avg_loss = sum(losses) / len(losses)
         if is_main_process():
-            tb_writer.add_scalar(f'{name}/loss', avg_loss, examples)
+            tb_writer.add_scalar(f'{name}/loss', avg_loss, step)
             if wandb_enable:
-                wandb.log({f'{name}/loss': avg_loss, 'examples': examples})
+                wandb.log({f'{name}/loss': avg_loss, 'step': step})
 
     duration = time.time() - start
     if is_main_process():
-        tb_writer.add_scalar('eval/eval_time_sec', duration, examples)
+        tb_writer.add_scalar('eval/eval_time_sec', duration, step)
         if wandb_enable:
-            wandb.log({'eval/eval_time_sec': duration, 'examples': examples})
+            wandb.log({'eval/eval_time_sec': duration, 'step': step})
         pbar.close()
 
 
-def evaluate(model, model_engine, eval_dataloaders, tb_writer, examples, eval_gradient_accumulation_steps, disable_block_swap):
+def evaluate(model, model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps, disable_block_swap):
     if len(eval_dataloaders) == 0:
         return
     empty_cuda_cache()
@@ -226,7 +227,7 @@ def evaluate(model, model_engine, eval_dataloaders, tb_writer, examples, eval_gr
         random.seed(seed)
         torch.manual_seed(seed)
         np.random.seed(seed)
-        _evaluate(model_engine, eval_dataloaders, tb_writer, examples, eval_gradient_accumulation_steps)
+        _evaluate(model_engine, eval_dataloaders, tb_writer, step, eval_gradient_accumulation_steps)
     empty_cuda_cache()
     model.prepare_block_swap_training()
 
@@ -795,21 +796,23 @@ if __name__ == '__main__':
         new_epoch, checkpointed, saved = saver.process_epoch(epoch, step, examples)
         finished_epoch = True if new_epoch != epoch else False
 
+        x_axis = examples if config['x_axis_examples'] else step
+
         if is_main_process() and step % config['logging_steps'] == 0:
-            tb_writer.add_scalar(f'train/loss', loss, examples)
+            tb_writer.add_scalar(f'train/loss', loss, x_axis)
             if wandb_enable:
-                wandb.log({'train/loss': loss, 'examples': examples})
+                wandb.log({'train/loss': loss, 'step': x_axis})
             if optimizer.__class__.__name__ == 'Prodigy':
                 prodigy_d = get_prodigy_d(optimizer)
-                tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, examples)
+                tb_writer.add_scalar(f'train/prodigy_d', prodigy_d, x_axis)
             if optimizer.__class__.__name__ in ('Automagic', 'GenericOptim'):
                 lrs, avg_lr = _get_automagic_lrs(optimizer)
                 if avg_lr > 0:
-                    tb_writer.add_histogram(f'train/automagic_lrs', lrs, examples)
-                    tb_writer.add_scalar(f'train/automagic_avg_lr', avg_lr, examples)
+                    tb_writer.add_histogram(f'train/automagic_lrs', lrs, x_axis)
+                    tb_writer.add_scalar(f'train/automagic_avg_lr', avg_lr, x_axis)
 
         if (config['eval_every_n_steps'] and step % config['eval_every_n_steps'] == 0) or (finished_epoch and config['eval_every_n_epochs'] and epoch % config['eval_every_n_epochs'] == 0):
-            evaluate(model, model_engine, eval_dataloaders, tb_writer, examples, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
+            evaluate(model, model_engine, eval_dataloaders, tb_writer, x_axis, config['eval_gradient_accumulation_steps'], disable_block_swap_for_eval)
 
         if finished_epoch:
             if is_main_process():

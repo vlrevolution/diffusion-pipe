@@ -106,6 +106,9 @@ steps_per_print = 1
 # default is single_beginning
 video_clip_mode = 'single_beginning'
 
+# By default, the loss graphs in Tensorboard / WandB have step as the x-axis. You can change it to number of examples seen instead.
+#x_axis_examples = true
+
 # This is how you configure HunyuanVideo. Other models will be different. See docs/supported_models.md for
 # details on the configuration and options for each model.
 [model]
