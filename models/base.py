@@ -254,7 +254,11 @@ class BasePipeline:
             with torch.autocast('cuda', enabled=False):
                 output = output.to(torch.float32)
                 target = target.to(output.device, torch.float32)
-                loss = F.mse_loss(output, target, reduction='none')
+                if 'pseudo_huber_c' in self.config:
+                    c = self.config['pseudo_huber_c']
+                    loss = torch.sqrt((output-target)**2 + c**2) - c
+                else:
+                    loss = F.mse_loss(output, target, reduction='none')
                 # empty tensor means no masking
                 if mask.numel() > 0:
                     mask = mask.to(output.device, torch.float32)

@@ -39,6 +39,9 @@ warmup_steps = 100
 # Block swapping only works for LoRA training, and requires pipeline_stages=1.
 #blocks_to_swap = 20
 
+# Use pseudo Huber loss with constant c. Only works on models that use the default loss function.
+#pseudo_huber_c = 0.5
+
 # eval settings
 
 eval_every_n_epochs = 1
