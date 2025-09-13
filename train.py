@@ -335,6 +335,9 @@ if __name__ == '__main__':
     elif model_type == 'qwen_image':
         from models import qwen_image
         model = qwen_image.QwenImagePipeline(config)
+    elif model_type == 'hunyuan_image':
+        from models import hunyuan_image
+        model = hunyuan_image.HunyuanImagePipeline(config)
     else:
         raise NotImplementedError(f'Model type {model_type} is not implemented')
 

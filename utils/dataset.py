@@ -1104,7 +1104,7 @@ class DatasetManager:
         # I think this is because HF Datasets uses the multiprocess library (different from Python multiprocessing!) so it will always use fork.
         cpu_results = {}
         for k, v in results.items():
-            if isinstance(v, list):
+            if isinstance(v, (list, tuple)):
                 cpu_results[k] = [x.to('cpu') for x in v]
             else:
                 cpu_results[k] = v.to('cpu')
