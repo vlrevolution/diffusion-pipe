@@ -14,7 +14,7 @@ Models supported: SDXL, Flux, LTX-Video, HunyuanVideo (t2v), Cosmos, Lumina Imag
 
 ## Recent changes
 - 2025-09-13
-  - Support HunyuanImage-2.1.
+  - Support HunyuanImage-2.1. This adds a new submodule; make sure to run ```git submodule update``` after pull.
 - 2025-08-23
   - Support Qwen-Image-Edit. Make sure to update dependencies. You will need the latest Diffusers.
 - 2025-08-07
