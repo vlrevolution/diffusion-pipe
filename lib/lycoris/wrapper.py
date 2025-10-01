@@ -106,12 +106,18 @@ def create_lycoris(module, multiplier=1.0, linear_dim=4, linear_alpha=1, **kwarg
     if full_matrix:
         logger.info("Full matrix mode for LoKr is enabled")
 
-    preset = kwargs.get("preset", "full")
-    if preset not in PRESET:
-        preset = read_preset(preset)
+    preset_arg = kwargs.get("preset", "full")
+    if isinstance(preset_arg, dict):
+        # The preset is already a dictionary from the config, use it directly
+        preset = preset_arg
+    elif preset_arg in PRESET:
+        # It's a string name of a built-in preset
+        preset = PRESET[preset_arg]
     else:
-        preset = PRESET[preset]
-    assert preset is not None
+        # It's a string path to a preset file
+        preset = read_preset(preset_arg)
+
+    assert preset is not None, f"Preset '{preset_arg}' could not be loaded or found."
     LycorisNetwork.apply_preset(preset)
 
     logger.info(f"Using rank adaptation algo: {algo}")
