@@ -547,8 +547,12 @@ class LokrModule(LycorisBaseModule):
         if self.bypass_mode:
             return self.bypass_forward(x, self.multiplier)
         else:
-            diff_weight = self.get_weight(self.shape).to(self.dtype) * self.scalar
-            weight = self.org_module[0].weight.data.to(self.dtype)
+            # Use the input tensor `x` to determine the correct device
+            diff_weight = self.get_weight(self.shape).to(
+                x.device, dtype=self.dtype
+            ) * self.scalar.to(x.device)
+            weight = self.org_module[0].weight.data.to(x.device, dtype=self.dtype)
+
             if self.wd:
                 weight = self.apply_weight_decompose(
                     weight + diff_weight, self.multiplier
@@ -557,10 +561,11 @@ class LokrModule(LycorisBaseModule):
                 weight = weight + diff_weight
             else:
                 weight = weight + diff_weight * self.multiplier
+
             bias = (
                 None
                 if self.org_module[0].bias is None
-                else self.org_module[0].bias.data
+                else self.org_module[0].bias.data.to(x.device)
             )
             return self.op(x, weight, bias, **self.kw_dict)
 

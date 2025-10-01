@@ -314,18 +314,23 @@ class LoConModule(LycorisBaseModule):
 
         dtype = self.dtype
         if not self.bypass_mode:
-            diff_weight = self.make_weight(x.device).to(dtype) * scale
-            weight = self.org_module[0].weight.data.to(dtype)
+            # Use the input tensor `x` to determine the correct device
+            diff_weight = (
+                self.make_weight(x.device).to(x.device, dtype=self.dtype) * scale
+            )
+            weight = self.org_module[0].weight.data.to(x.device, dtype=self.dtype)
+
             if self.wd:
                 weight = self.apply_weight_decompose(
                     weight + diff_weight, self.multiplier
                 )
             else:
                 weight = weight + diff_weight * self.multiplier
+
             bias = (
                 None
                 if self.org_module[0].bias is None
-                else self.org_module[0].bias.data
+                else self.org_module[0].bias.data.to(x.device)
             )
             return self.op(x, weight, bias, **self.kw_dict)
         else:
