@@ -21,6 +21,7 @@ from utils.common import (
     get_lin_function,
     time_shift,
     iterate_safetensors,
+    is_main_process,
 )
 from utils.offloading import ModelOffloader
 
@@ -326,26 +327,38 @@ class QwenImagePipeline(BasePipeline):
         return [self.text_encoder]
 
     def save_adapter(self, save_dir, state_dict):
-        """
-        Saves the adapter weights with special key remapping for Qwen-Image
-        to ensure ComfyUI compatibility.
-        """
         adapter_library = self.config["adapter"].get("library", "peft").lower()
 
         if adapter_library == "lycoris":
-            # LyCORIS with Qwen-Image needs specific key remapping for ComfyUI.
-            # The keys from lycoris_net.state_dict() are like:
-            #   lycoris_transformer_blocks_0_attn_to_q.lokr_w1
-            # We need to convert them to ComfyUI's expected format:
-            #   diffusion_model.transformer_blocks.0.attn.to_q.lokr_w1
+            # LyCORIS with Qwen-Image needs specific key remapping for ComfyUI compatibility.
+            # LyCORIS keys are like: lycoris_transformer_blocks_0_attn_to_q.lokr_w1
+            # ComfyUI expects: diffusion_model.transformer_blocks.0.attn.to_q.lokr_w1
             comfyui_state_dict = {}
             for key, value in state_dict.items():
-                # Remove the 'lycoris_' prefix and add 'diffusion_model.'
-                new_key = key.replace("lycoris_", "diffusion_model.")
-                # Replace the first underscore after the prefix with a dot
-                new_key = new_key.replace("_", ".", 1)
-                # Replace underscores between a word and a number with a dot (e.g., blocks_0 -> blocks.0)
-                new_key = re.sub(r"_(?=\d)", ".", new_key)
+                # Remove the 'lycoris_' prefix
+                if not key.startswith("lycoris_"):
+                    comfyui_state_dict[key] = value
+                    continue
+
+                # The part of the key that represents the module path
+                module_path_part, weight_name_part = key.split(".", 1)
+                module_path_part = module_path_part.replace("lycoris_", "")
+
+                # Replace underscores with dots, except when it's part of a layer name like 'to_q'
+                # A simple way that works for this model's structure:
+                # transformer_blocks_0_attn_to_q -> transformer_blocks.0.attn.to_q
+                # This can be done by replacing all '_' with '.' and then fixing known layer names.
+                # A safer regex approach is better.
+
+                # Replace underscores between words and before numbers
+                module_path_part = re.sub(
+                    r"_(?=[a-zA-Z])", ".", module_path_part
+                )  # e.g., transformer_blocks -> transformer.blocks
+                module_path_part = re.sub(
+                    r"_(?=\d)", ".", module_path_part
+                )  # e.g., blocks_0 -> blocks.0
+
+                new_key = f"diffusion_model.{module_path_part}.{weight_name_part}"
                 comfyui_state_dict[new_key] = value
 
             safetensors.torch.save_file(
@@ -354,9 +367,7 @@ class QwenImagePipeline(BasePipeline):
                 metadata={"format": "pt"},
             )
         else:
-            # For PEFT, we fall back to the generic implementation from BasePipeline.
-            # Note: The original implementation in this file was also valid for PEFT,
-            # but calling super() is cleaner and reuses our refactored code.
+            # Fall back to the parent PEFT implementation if not using LyCORIS
             super().save_adapter(save_dir, state_dict)
 
     def save_model(self, save_dir, state_dict):
