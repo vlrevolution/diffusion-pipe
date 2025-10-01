@@ -204,7 +204,7 @@ class ButterflyOFTModule(LycorisBaseModule):
         b = self.boft_b
         r_b = b // 2
         r = self.get_r()
-        inp = org = self.org_forward(x)
+        inp = org = self.perform_org_forward(x)
         if self.op in {F.conv2d, F.conv1d, F.conv3d}:
             inp = inp.transpose(1, -1)
 
@@ -244,7 +244,7 @@ class ButterflyOFTModule(LycorisBaseModule):
     def forward(self, x, *args, **kwargs):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.org_forward(x)
+                return self.perform_org_forward(x)
         scale = self.multiplier
 
         if self.bypass_mode:

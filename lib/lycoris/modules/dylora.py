@@ -138,12 +138,12 @@ class DyLoraModule(LycorisBaseModule):
         return self.op(self.op(x, down, **self.kw_dict), up)
 
     def bypass_forward(self, x, scale=1, rank=None):
-        return self.org_forward(x) + self.bypass_forward_diff(x, scale, rank)
+        return self.perform_org_forward(x) + self.bypass_forward_diff(x, scale, rank)
 
     def forward(self, x, *args, **kwargs):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.org_forward(x)
+                return self.perform_org_forward(x)
         if self.bypass_mode:
             return self.bypass_forward(x, self.multiplier)
         else:

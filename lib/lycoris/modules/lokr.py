@@ -549,12 +549,12 @@ class LokrModule(LycorisBaseModule):
         org_output = self.op(x, org_weight, org_bias, **self.kw_dict)
 
         # Add the adapter's differential output
-        return org_output + self.bypass_forward_diff(x, scale=scale)
+        return self.perform_org_forward(x) + self.bypass_forward_diff(x, scale=scale)
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.org_forward(x)
+                return self.perform_org_forward(x)
         if self.bypass_mode:
             return self.bypass_forward(x, self.multiplier)
         else:

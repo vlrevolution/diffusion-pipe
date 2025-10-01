@@ -345,3 +345,15 @@ class LycorisBaseModule(ModuleCustomSD):
 
     def forward(self, *args, **kwargs):
         raise NotImplementedError
+
+    def perform_org_forward(self, x):
+        """
+        A device-aware replacement for self.org_forward(x).
+        """
+        org_weight = self.org_module[0].weight.to(device=x.device, dtype=x.dtype)
+        org_bias = (
+            self.org_module[0].bias.to(device=x.device, dtype=x.dtype)
+            if self.org_module[0].bias is not None
+            else None
+        )
+        return self.op(x, org_weight, org_bias, **self.kw_dict)

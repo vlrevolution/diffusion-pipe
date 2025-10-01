@@ -231,7 +231,7 @@ class GLoRAModule(LycorisBaseModule):
             ax_mid = ax_mid * drop_a
             bx_mid = bx_mid * drop_b
         return (
-            self.org_forward(
+            self.perform_org_forward(
                 (0 if diff else x) + self.drop(self.a1(ax_mid)) * self.scale
             )
             + self.drop(self.b1(bx_mid)) * self.scale
@@ -246,7 +246,7 @@ class GLoRAModule(LycorisBaseModule):
     def forward(self, x, *args, **kwargs):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.org_forward(x)
+                return self.perform_org_forward(x)
         if self.bypass_mode:
             return self.bypass_forward(x, self.multiplier)
         else:
