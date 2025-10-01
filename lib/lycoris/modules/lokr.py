@@ -538,7 +538,18 @@ class LokrModule(LycorisBaseModule):
         return self.drop(h * scale * self.scalar)
 
     def bypass_forward(self, x, scale=1):
-        return self.org_forward(x) + self.bypass_forward_diff(x, scale=scale)
+        # Perform the original forward pass, ensuring all tensors are on the correct device.
+        org_weight = self.org_module[0].weight.to(device=x.device, dtype=x.dtype)
+        org_bias = (
+            self.org_module[0].bias.to(device=x.device, dtype=x.dtype)
+            if self.org_module[0].bias is not None
+            else None
+        )
+
+        org_output = self.op(x, org_weight, org_bias, **self.kw_dict)
+
+        # Add the adapter's differential output
+        return org_output + self.bypass_forward_diff(x, scale=scale)
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         if self.module_dropout and self.training:
