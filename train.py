@@ -152,18 +152,42 @@ def set_config_defaults(config):
 
     if "adapter" in config:
         adapter_config = config["adapter"]
-        adapter_type = adapter_config["type"]
-        if adapter_config["type"] == "lora":
-            if "alpha" in adapter_config:
+        adapter_library = adapter_config.get("library", "peft").lower()
+        adapter_type = adapter_config.get(
+            "type", "lora"
+        ).lower()  # Ensure 'type' exists
+
+        if adapter_library == "peft":
+            if adapter_type == "lora":
+                if "alpha" in adapter_config:
+                    raise NotImplementedError(
+                        "This script forces alpha=rank to make the saved LoRA format simpler and more predictable with downstream inference programs. Please remove alpha from the config."
+                    )
+                adapter_config["alpha"] = adapter_config["rank"]
+                adapter_config.setdefault("dropout", 0.0)
+            else:
                 raise NotImplementedError(
-                    "This script forces alpha=rank to make the saved LoRA format simpler and more predictable with downstream inference programs. Please remove alpha from the config."
+                    f"PEFT adapter type '{adapter_type}' is not implemented in set_config_defaults validation."
                 )
-            adapter_config["alpha"] = adapter_config["rank"]
+        elif adapter_library == "lycoris":
+            # LyCORIS has many types (lora, loha, lokr, etc.), so we'll allow them if the library is specified.
+            # We'll rely on the lycoris library itself to validate the 'type' later.
+            # Just ensure basic settings are present.
+            adapter_config.setdefault("rank", 4)  # Default rank if not specified
+            adapter_config.setdefault(
+                "alpha", adapter_config["rank"]
+            )  # Default alpha if not specified
             adapter_config.setdefault("dropout", 0.0)
-            adapter_config.setdefault("dtype", model_dtype_str)
-            adapter_config["dtype"] = DTYPE_MAP[adapter_config["dtype"]]
+            # network_args is a dict, ensure it exists if not present
+            adapter_config.setdefault("network_args", {})
         else:
-            raise NotImplementedError(f"Adapter type {adapter_type} is not implemented")
+            raise NotImplementedError(
+                f"Adapter library '{adapter_library}' is not implemented in set_config_defaults validation."
+            )
+
+        # Common dtype setting, regardless of adapter library
+        adapter_config.setdefault("dtype", model_dtype_str)
+        adapter_config["dtype"] = DTYPE_MAP[adapter_config["dtype"]]
 
     config.setdefault("logging_steps", 1)
     config.setdefault("eval_datasets", [])
