@@ -562,7 +562,7 @@ class LokrModule(LycorisBaseModule):
             bias = (
                 None
                 if self.org_module[0].bias is None
-                else self.org_module[0].bias.data
+                else self.org_module[0].bias.data.to(device=x.device)
             )
             return self.op(x, weight, bias, **self.kw_dict)
 

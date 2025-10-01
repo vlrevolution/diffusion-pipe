@@ -157,7 +157,7 @@ class FullModule(LycorisBaseModule):
             diff_w, diff_b = self.get_diff_weight(scale, device=device)
             weight = self.org_weight.to(device) + diff_w * drop
             if self.org_bias is not None:
-                bias = self.org_bias + diff_b * drop
+                bias = self.org_bias[0].to(device) + diff_b * drop
             else:
                 bias = None
         else:
