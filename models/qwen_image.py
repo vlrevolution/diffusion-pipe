@@ -25,7 +25,7 @@ from utils.common import (
 )
 from utils.offloading import ModelOffloader
 
-from lycoris import LycorisNetwork, create_lycoris
+from lib.lycoris import LycorisNetwork, create_lycoris
 
 
 KEEP_IN_HIGH_PRECISION = ["time_text_embed", "img_in", "txt_in", "norm_out", "proj_out"]

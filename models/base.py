@@ -11,7 +11,7 @@ import torchvision
 from PIL import Image, ImageOps
 from torchvision import transforms
 import imageio
-from lycoris import create_lycoris, LycorisNetwork
+from lib.lycoris import create_lycoris, LycorisNetwork
 
 from utils.common import (
     is_main_process,

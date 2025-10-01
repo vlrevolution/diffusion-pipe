@@ -27,5 +27,4 @@ ftfy
 pytorch-optimizer
 wandb
 optimum-quanto
-lycoris-lora
 prodigy-plus-schedule-free
