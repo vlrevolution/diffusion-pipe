@@ -720,6 +720,8 @@ if __name__ == "__main__":
         print(f"Computed eval_every_n_steps = {config['eval_every_n_steps']}")
 
     def get_optimizer(model_parameters):
+        model_parameters = [p for p in model_parameters if p.requires_grad]
+
         if len(model_parameters) == 0:
             return DummyOptimizer()
 
