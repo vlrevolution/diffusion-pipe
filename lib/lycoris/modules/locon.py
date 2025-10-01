@@ -304,31 +304,18 @@ class LoConModule(LycorisBaseModule):
         return self.dropout(self.lora_up(mid) * self.scalar * self.scale * scale)
 
     def bypass_forward(self, x, scale=1):
-        # Perform the original forward pass, ensuring all tensors are on the correct device.
-        org_weight = self.org_module[0].weight.to(device=x.device, dtype=x.dtype)
-        org_bias = (
-            self.org_module[0].bias.to(device=x.device, dtype=x.dtype)
-            if self.org_module[0].bias is not None
-            else None
-        )
-
-        org_output = self.op(x, org_weight, org_bias, **self.kw_dict)
-
-        # Add the adapter's differential output
-        return self.perform_org_forward(x) + self.bypass_forward_diff(x, scale=scale)
+        return self.org_forward(x) + self.bypass_forward_diff(x, scale=scale)
 
     def forward(self, x):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.perform_org_forward(x)
+                return self.org_forward(x)
         scale = self.scale
 
         dtype = self.dtype
         if not self.bypass_mode:
             diff_weight = self.make_weight(x.device).to(dtype) * scale
-            weight = self.org_module[0].weight.data.to(
-                device=x.device, dtype=self.dtype
-            )
+            weight = self.org_module[0].weight.data.to(dtype)
             if self.wd:
                 weight = self.apply_weight_decompose(
                     weight + diff_weight, self.multiplier

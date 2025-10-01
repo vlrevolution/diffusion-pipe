@@ -115,7 +115,7 @@ class IA3Module(LycorisBaseModule):
         weight = self.weight * scale + int(not diff)
         if self.train_input:
             x = x * weight
-        out = self.perform_org_forward(x)
+        out = self.org_forward(x)
         if not self.train_input:
             out = out * weight
         return out
@@ -129,7 +129,7 @@ class IA3Module(LycorisBaseModule):
     def forward(self, x, *args, **kwargs):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.perform_org_forward(x)
+                return self.org_forward(x)
         if self.bypass_mode:
             return self.bypass_forward(x, self.multiplier)
         else:

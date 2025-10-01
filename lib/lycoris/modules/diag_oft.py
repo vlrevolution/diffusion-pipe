@@ -172,7 +172,7 @@ class DiagOFTModule(LycorisBaseModule):
 
     def _bypass_forward(self, x, scale=1, diff=False):
         r = self.get_r()
-        org_out = self.perform_org_forward(x)
+        org_out = self.org_forward(x)
         if self.op in {F.conv2d, F.conv1d, F.conv3d}:
             org_out = org_out.transpose(1, -1)
         *shape, _ = org_out.shape
@@ -206,7 +206,7 @@ class DiagOFTModule(LycorisBaseModule):
     def forward(self, x: torch.Tensor, *args, **kwargs):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.perform_org_forward(x)
+                return self.org_forward(x)
         scale = self.multiplier
 
         if self.bypass_mode:

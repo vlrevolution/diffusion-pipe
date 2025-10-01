@@ -296,30 +296,25 @@ class LohaModule(LycorisBaseModule):
         return self.drop(self.op(x, diff_weight, **self.kw_dict))
 
     def bypass_forward(self, x, scale=1):
-        # Perform the original forward pass, ensuring all tensors are on the correct device.
-        org_weight = self.org_module[0].weight.to(device=x.device, dtype=x.dtype)
-        org_bias = (
-            self.org_module[0].bias.to(device=x.device, dtype=x.dtype)
-            if self.org_module[0].bias is not None
-            else None
-        )
-
-        org_output = self.op(x, org_weight, org_bias, **self.kw_dict)
-
-        # Add the adapter's differential output
-        return self.perform_org_forward(x) + self.bypass_forward_diff(x, scale=scale)
+        return self.org_forward(x) + self.bypass_forward_diff(x, scale=scale)
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         if self.module_dropout and self.training:
             if torch.rand(1) < self.module_dropout:
-                return self.perform_org_forward(x)
+                return self.op(
+                    x,
+                    self.org_module[0].weight.data,
+                    (
+                        None
+                        if self.org_module[0].bias is None
+                        else self.org_module[0].bias.data
+                    ),
+                )
         if self.bypass_mode:
             return self.bypass_forward(x, scale=self.multiplier)
         else:
             diff_weight = self.get_weight(self.shape).to(self.dtype) * self.scalar
-            weight = self.org_module[0].weight.data.to(
-                device=x.device, dtype=self.dtype
-            )
+            weight = self.org_module[0].weight.data.to(self.dtype)
             if self.wd:
                 weight = self.apply_weight_decompose(
                     weight + diff_weight, self.multiplier
@@ -329,6 +324,6 @@ class LohaModule(LycorisBaseModule):
             bias = (
                 None
                 if self.org_module[0].bias is None
-                else self.org_module[0].bias.data.to(device=x.device)
+                else self.org_module[0].bias.data
             )
             return self.op(x, weight, bias, **self.kw_dict)
