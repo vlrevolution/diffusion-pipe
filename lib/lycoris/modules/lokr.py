@@ -243,6 +243,8 @@ class LokrModule(LycorisBaseModule):
             torch.nn.init.kaiming_uniform_(self.lokr_w1_a, a=math.sqrt(5))
             torch.nn.init.kaiming_uniform_(self.lokr_w1_b, a=math.sqrt(5))
 
+        self.cached_org_weight = None  # <--- ADD THIS LINE
+
     @classmethod
     def make_module_from_state_dict(
         cls,
@@ -547,11 +549,20 @@ class LokrModule(LycorisBaseModule):
         if self.bypass_mode:
             return self.bypass_forward(x, self.multiplier)
         else:
-            # Use the input tensor `x` to determine the correct device
+            if (
+                self.cached_org_weight is None
+                or self.cached_org_weight.device != x.device
+            ):
+                # Cache the original weight on the correct device
+                self.cached_org_weight = self.org_module[0].weight.data.to(x.device)
+
+            # Get the LoKr delta weight
             diff_weight = self.get_weight(self.shape).to(
                 x.device, dtype=self.dtype
             ) * self.scalar.to(x.device)
-            weight = self.org_module[0].weight.data.to(x.device, dtype=self.dtype)
+
+            # Use the cached original weight
+            weight = self.cached_org_weight.to(self.dtype)
 
             if self.wd:
                 weight = self.apply_weight_decompose(
