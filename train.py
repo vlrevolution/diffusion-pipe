@@ -697,9 +697,12 @@ if __name__ == "__main__":
     if config["compile"]:
         pipeline_model.compile()
 
+    parameters_to_train = [p for p in pipeline_model.parameters() if p.requires_grad]
+
     model_engine, optimizer, _, _ = deepspeed.initialize(
         args=args,
         model=pipeline_model,
+        model_parameters=parameters_to_train,  # <--- ADD THIS ARGUMENT
         config=ds_config,
     )
     global_batch_size = (
